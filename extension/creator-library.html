@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>虾仁 · 达人库</title>
+  <link rel="icon" type="image/png" href="icons/shrimp-32.png">
+  <link rel="stylesheet" href="creator-library.css">
+  <script type="module" src="creator-library.js"></script>
+</head>
+<body>
+  <a id="library-skip" class="skip-link" href="#main">跳到达人库</a>
+  <aside class="sidebar" aria-label="连接与工具">
+    <a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true">
+      <!-- Lucide shrimp icon; ISC license in THIRD_PARTY_NOTICES.txt. -->
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <path d="M10 2a3.28 3.28 0 003.227 1.798l6.17-.561A1 1 0 1119.614 8H8.5a6.44 6.44 0 00-5.63 9.75A6.5 6.5 0 008.5 21c1.38 0 2-.5 2.5-1"></path>
+        <path d="M10 8a8.5 8.5 0 000 8"></path>
+        <path d="M11 22c-.5-.5-1.12-1-2.5-1a1 1 0 010-5H12a7 7 0 007-7V8"></path>
+        <path d="M13 12h.01"></path>
+        <path d="M8 16c-2 0-4.5-4-4-6"></path>
+      </svg>
+    </span><span>虾仁<small>独立自用版</small></span></a>
+    <div class="sidebar-rule"></div>
+    <nav aria-label="功能页面">
+      <a class="button sidebar-button secondary" href="dashboard.html">任务工作台</a>
+      <a class="button sidebar-button secondary" href="history.html">任务记录</a>
+      <a class="button sidebar-button" href="creator-library.html" aria-current="page">本地达人库</a>
+    </nav>
+    <p class="sidebar-help">在本机整理达人，标签和备注仅自己可见。</p>
+    <div class="sidebar-bottom"><span class="local-label">仅保存在当前浏览器</span><p class="sidebar-help">保存身份不代表能直接聊天。带回工作台后，仍须按当前店铺页面准备名单。</p></div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="page-header"><div><h1>达人库</h1><p>整理长期合作名单，在下一次任务中继续使用。</p></div><button id="library-refresh" type="button">刷新列表</button></header>
+    <div id="library-notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="workspace">
+      <div class="library-main">
+        <section class="card" aria-labelledby="library-heading">
+          <div class="section-heading"><h2 id="library-heading">本机名单</h2><span id="library-capacity" class="muted">正在读取…</span></div>
+          <div class="filters">
+            <label class="wide">搜索<input id="library-query" type="search" maxlength="200" placeholder="姓名、身份、标签或备注"></label>
+            <label>店铺<select id="library-shop-filter"><option value="">全部店铺</option></select></label>
+            <label>标签<select id="library-tag-filter"><option value="">全部标签</option></select></label>
+            <label>身份类型<select id="library-type-filter"><option value="">全部身份</option><option value="shopee_user_id">Shopee 用户 ID</option><option value="affiliate_id">联盟伙伴 ID</option><option value="unknown">未知身份</option></select></label>
+            <label>核实状态<select id="library-verification-filter"><option value="">全部状态</option><option value="unverified">待页面核实</option><option value="page_verified">曾经页面核实</option></select></label>
+          </div>
+          <div class="table-scroll"><table><caption class="sr-only">本地达人记录；选择后仍需工作台核对</caption><thead><tr><th scope="col">选择</th><th scope="col">达人与身份</th><th scope="col">站点 / 店铺</th><th scope="col">标签 / 备注</th><th scope="col">来源 / 核实</th><th scope="col">操作</th></tr></thead><tbody id="library-body"></tbody></table><p id="library-empty" class="empty">正在读取本机达人库…</p></div>
+          <div class="pagination"><span id="library-range">共 0 条</span><div><button id="library-previous" type="button" disabled>上一页</button><button id="library-next" type="button" disabled>下一页</button></div></div>
+          <div class="selection">
+            <div><strong id="library-selection-count" aria-live="polite">已选择 0 人</strong><p class="muted">按点选顺序带回；实际准备顺序由所选页面来源核对。</p></div>
+            <label>用于选人的店铺 ID<input id="library-target-shop" maxlength="100" autocomplete="off" placeholder="先在工作台连接店铺"></label>
+            <div class="actions"><button id="library-clear-selection" type="button">清空选择</button><button id="library-return" class="primary" type="button" disabled>带回工作台核对</button></div>
+          </div>
+          <p class="help">仅可选择同店铺且已记录 Shopee 用户 ID 的达人；伙伴 ID、未知身份须先核实映射。曾经核实也不能替代本次页面核对。</p>
+        </section>
+        <section class="card" aria-labelledby="transfer-heading">
+          <div class="section-heading"><h2 id="transfer-heading">导入与备份</h2><div class="actions"><button id="library-export-json" type="button" disabled>导出 JSON</button><button id="library-export-csv" type="button" disabled>导出 CSV</button></div></div>
+          <p class="help">导出当前筛选结果；JSON 适合完整备份，CSV 适合表格整理。导入不会覆盖重复身份的原标签与备注，所有导入身份都需要重新核实。</p>
+          <details><summary>导入达人名单</summary>
+            <div class="import-grid"><label>文件（最多 4MiB）<input id="library-import-file" type="file" accept=".json,.csv,application/json,text/csv"></label><label>内容格式<select id="library-import-format"><option value="json">JSON</option><option value="csv">CSV</option></select></label></div>
+            <label>或粘贴内容<textarea id="library-import-text" rows="5" placeholder='[{"name":"示例","identityType":"shopee_user_id","identityValue":"123","site":"ID","shopId":"10"}]'></textarea></label>
+            <p class="help">CSV 必填列：identityType、identityValue、site、shopId。可选列：name、sourceKind、sourceLabel、tags、note。tags 使用 JSON 数组，例如 ["美妆"]；身份值须按文本保存。身份类型使用 shopee_user_id、affiliate_id 或 unknown。</p>
+            <button id="library-import" class="primary" type="button" disabled>导入到本机</button>
+          </details>
+        </section>
+      </div>
+      <section class="card editor" aria-labelledby="library-editor-title">
+        <h2 id="library-editor-title" tabindex="-1">添加达人</h2>
+        <form id="library-form">
+          <label>姓名（可选）<input id="library-name" maxlength="120" autocomplete="off"></label>
+          <label>身份类型<select id="library-identity-type"><option value="shopee_user_id">Shopee 用户 ID</option><option value="affiliate_id">联盟伙伴 ID</option><option value="unknown">未知身份</option></select></label>
+          <label>身份值<input id="library-identity-value" maxlength="100" required autocomplete="off" aria-describedby="identity-help"></label>
+          <p id="identity-help" class="help">两个 ID 类型不能互换；不确定时选择“未知身份”。添加不会自动核实。</p>
+          <label>站点<input value="ID · 印尼" readonly aria-label="站点：印尼"></label>
+          <label>所属店铺 ID（可选）<input id="library-shop" maxlength="100" autocomplete="off"></label>
+          <p class="help">未知店铺可以先保存，选人前需补全与当前工作台一致的店铺 ID。</p>
+          <label>记录来源<select id="library-source-kind"><option value="manual">手工整理</option><option value="import">文件导入</option><option value="marketplace">达人广场</option><option value="leaderboard">排行榜</option><option value="specified">指定伙伴</option></select></label>
+          <label>来源说明（可选）<input id="library-source-label" maxlength="120" placeholder="例如：Top Sales，本周整理"></label>
+          <label>标签（最多 20 个）<input id="library-tags" maxlength="1500" placeholder="使用逗号分隔，例如：美妆,待跟进"></label>
+          <p class="help">单个标签含逗号时，使用数组保留，例如 ["beauty, skincare"]。</p>
+          <label>备注<textarea id="library-note" rows="5" maxlength="1000" placeholder="合作偏好、下次跟进事项"></textarea></label>
+          <div class="actions"><button id="library-save" class="primary" type="submit" disabled>保存达人</button><button id="library-cancel-edit" type="button">清空表单</button></div>
+        </form>
+      </section>
+    </div>
+    <footer>虾仁 · 本地达人库<span>最多 2000 条 / 2MiB；容量满时阻止新增，不自动删除。导出包含达人身份和备注，请妥善保存。</span></footer>
+  </main>
+</body>
+</html>

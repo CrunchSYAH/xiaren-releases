@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>虾仁 · 任务记录</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/shrimp-32.png">
+  <link rel="stylesheet" href="dashboard.css">
+  <link rel="stylesheet" href="history.css">
+  <script type="module" src="history.mjs"></script>
+</head>
+<body class="history-page">
+  <a id="history-skip" class="skip-link" href="#main">跳到任务记录</a>
+  <aside class="sidebar" aria-label="页面导航">
+    <a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true">
+      <!-- Lucide shrimp icon; ISC license in THIRD_PARTY_NOTICES.txt. -->
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <path d="M10 2a3.28 3.28 0 003.227 1.798l6.17-.561A1 1 0 1119.614 8H8.5a6.44 6.44 0 00-5.63 9.75A6.5 6.5 0 008.5 21c1.38 0 2-.5 2.5-1"></path><path d="M10 8a8.5 8.5 0 000 8"></path><path d="M11 22c-.5-.5-1.12-1-2.5-1a1 1 0 010-5H12a7 7 0 007-7V8"></path><path d="M13 12h.01"></path><path d="M8 16c-2 0-4.5-4-4-6"></path>
+      </svg>
+    </span><span>虾仁<small>独立自用版</small></span></a>
+    <div class="sidebar-rule"></div>
+    <nav class="history-navigation" aria-label="功能页面"><a class="button sidebar-button secondary" href="dashboard.html">任务工作台</a><a class="button sidebar-button" href="history.html" aria-current="page">任务记录</a></nav>
+    <p class="sidebar-help history-sidebar-help">查看保存在本机的任务，无需连接 Shopee。此页仅供查阅和导出，任务操作请返回工作台。</p>
+    <div class="sidebar-bottom"><span class="local-label">数据保存在本机</span><p class="sidebar-help history-sidebar-help">记录包含消息内容与达人结果。图片只保存引用，历史导出不含图片原件，请单独保管原图。</p></div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="page-header"><div><h1>任务记录</h1><p>按店铺回看原配置和逐人处理结果。</p></div><div class="history-actions"><button id="history-refresh" class="button button-outline" type="button">刷新记录</button><button id="history-export" class="button button-primary" type="button" disabled>导出筛选结果</button></div></header>
+    <div id="history-notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section class="settings history-filters" aria-labelledby="filters-heading">
+      <div class="section-heading"><h2 id="filters-heading">筛选记录</h2><p class="muted">不填条件时显示全部任务</p></div>
+      <div class="history-filter-grid">
+        <div><label for="history-shop">店铺</label><select id="history-shop"><option value="">全部店铺</option></select></div>
+        <div><label for="history-mode">模式</label><select id="history-mode"><option value="">全部模式</option><option value="dry-run">演练</option><option value="send">真实发送</option></select></div>
+        <div><label for="history-status">任务状态</label><select id="history-status"><option value="">全部状态</option><option value="running">正在处理</option><option value="pausing">正在安全暂停</option><option value="paused">已暂停</option><option value="stopping">正在安全停止</option><option value="stopped">已停止</option><option value="completed">已结束</option></select></div>
+        <div class="history-query-field"><label for="history-query">关键词</label><input id="history-query" type="search" autocomplete="off" maxlength="200" placeholder="店铺名称或任务 ID"></div>
+        <div><label for="history-from">创建开始日期</label><input id="history-from" type="date" aria-describedby="history-date-help"></div>
+        <div><label for="history-to">创建结束日期</label><input id="history-to" type="date" aria-describedby="history-date-help"></div>
+      </div>
+      <p id="history-date-help" class="field-help">日期包含当天；留空表示不限。</p>
+    </section>
+    <section class="history-list" aria-labelledby="history-heading">
+      <div class="section-heading history-list-heading"><h2 id="history-heading">任务列表</h2><p id="history-capacity" class="muted">正在读取本机记录…</p></div>
+      <p class="field-help history-duration-help">总耗时含逐人间隔、等待和暂停；未结束任务在刷新记录或重新查看详情时更新。</p>
+      <div class="table-scroll history-table-scroll"><table class="history-table"><caption class="sr-only">任务记录，按创建时间从新到旧排列</caption><thead><tr><th scope="col">任务名称 / ID</th><th scope="col">店铺</th><th scope="col">创建时间</th><th scope="col">模式</th><th scope="col">状态</th><th scope="col">总耗时</th><th scope="col">结果摘要</th><th scope="col">操作</th></tr></thead><tbody id="history-body"></tbody></table><div id="history-empty" class="empty-state" role="status">正在读取任务记录…</div></div>
+      <nav class="roster-pagination" aria-label="任务记录分页"><span id="history-range">共 0 条</span><div class="pagination-controls"><button id="history-previous" class="button button-outline" type="button" disabled>上一页</button><span id="history-page" role="status" aria-live="polite">第 1 / 1 页</span><button id="history-next" class="button button-outline" type="button" disabled>下一页</button></div></nav>
+    </section>
+    <section id="history-detail" class="history-detail" aria-labelledby="detail-title" aria-busy="false" hidden>
+      <div class="section-heading"><div><h2 id="detail-title" tabindex="-1">任务详情</h2><p id="detail-meta" class="muted"></p></div><div class="history-actions"><button id="detail-export" class="button button-outline" type="button" disabled>导出此条记录</button><button id="detail-close" class="text-button" type="button">收起详情</button></div></div>
+      <p id="detail-reason" class="history-detail-reason" hidden></p>
+      <div class="history-config"><dl class="history-config-facts"><div><dt>任务名称</dt><dd id="detail-task-name"></dd></div><div><dt>逐人间隔</dt><dd id="detail-interval"></dd></div><div><dt>目标人数</dt><dd id="detail-target"></dd></div><div><dt>总耗时</dt><dd id="detail-duration"></dd></div><div class="history-source"><dt>名单来源与条件</dt><dd id="detail-source"></dd></div></dl><div id="detail-messages" class="history-messages" aria-label="原消息顺序与内容"></div></div>
+      <h3 class="history-results-heading">逐人结果</h3><div class="table-scroll history-item-scroll"><table class="history-item-table"><caption class="sr-only">当前任务的逐人处理结果</caption><thead><tr><th scope="col">达人</th><th scope="col">状态</th><th scope="col">已提交消息数</th><th scope="col">原因</th></tr></thead><tbody id="detail-items"></tbody></table></div>
+    </section>
+    <footer>虾仁 · 任务记录<span>已提交表示完成发送点击，不核对平台接受、送达或已读。</span></footer>
+  </main>
+</body>
+</html>

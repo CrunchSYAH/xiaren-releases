@@ -1,0 +1,230 @@
+.history-navigation a {
+  text-decoration:none
+}
+.history-actions {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:10px
+}
+.history-filter-grid {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:18px 20px
+}
+.history-filters input {
+  width:100%;
+  min-width:0;
+  min-height:42px;
+  border:1px solid #bac9d9;
+  border-radius:5px;
+  background:#fff;
+  color:var(--ink);
+  padding:10px 11px;
+  line-height:1.5
+}
+.history-list,.history-detail {
+  background:var(--white);
+  border:1px solid var(--line);
+  border-radius:9px;
+  margin-bottom:22px;
+  overflow:hidden
+}
+.history-list-heading {
+  padding:20px 22px 0;
+  align-items:flex-start
+}
+#history-capacity {
+  max-width:52%;
+  text-align:right
+}
+.history-table-scroll {
+  min-height:195px
+}
+.history-table {
+  min-width:1080px;
+  table-layout:auto
+}
+.history-table th:nth-child(n),.history-item-table th:nth-child(n) {
+  width:auto
+}
+.history-table th:nth-child(7) {
+  width:28%
+}
+.history-duration {
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums
+}
+.history-duration-help {
+  margin:8px 22px 0
+}
+.history-table td:nth-child(3) {
+  min-width:142px;
+  font-variant-numeric:tabular-nums
+}
+.history-table td:last-child {
+  white-space:nowrap
+}
+.history-table .text-button {
+  padding:5px 0
+}
+.history-task-id {
+  font-weight:600
+}
+.history-result {
+  line-height:1.9
+}
+.history-detail {
+  padding:22px
+}
+.history-detail>.section-heading {
+  align-items:flex-start
+}
+#detail-meta {
+  margin-top:8px;
+  overflow-wrap:anywhere
+}
+.history-detail-reason {
+  border-left:3px solid #d3a056;
+  background:#fff6e7;
+  color:var(--warning);
+  line-height:1.8;
+  padding:10px 13px;
+  margin-bottom:18px;
+  overflow-wrap:anywhere
+}
+.history-config {
+  display:grid;
+  grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);
+  gap:18px 24px;
+  margin-top:22px
+}
+.history-messages {
+  grid-column:1/-1;
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:20px 24px
+}
+.history-source {flex-basis:100%;overflow-wrap:anywhere}
+.history-message h3,.history-config-facts dt {
+  font-size:12px;
+  font-weight:600;
+  color:var(--muted)
+}
+.history-content {
+  margin-top:9px;
+  line-height:1.9;
+  overflow-wrap:anywhere;
+  white-space:pre-wrap;
+  max-height:300px;
+  overflow:auto;
+  padding:12px 14px;
+  background:#f8f8f2;
+  border:1px solid #e4e4e0;
+  border-radius:8px
+}
+.history-config-facts {
+  grid-column:1/-1;
+  display:flex;
+  flex-wrap:wrap;
+  gap:20px 50px;
+  margin:0
+}
+.history-config-facts dd {
+  margin:7px 0 0;
+  font-variant-numeric:tabular-nums
+}
+.history-results-heading {
+  margin:25px 0 12px
+}
+.history-item-scroll {
+  min-height:0;
+  max-height:480px;
+  border:1px solid var(--line);
+  border-radius:5px
+}
+.history-item-table {
+  min-width:580px;
+  table-layout:auto
+}
+.history-item-table th:nth-child(4) {
+  width:42%
+}
+.history-item-table td {
+  line-height:1.8
+}
+.history-person-id {
+  display:block;
+  margin-top:4px;
+  color:var(--muted)
+}
+[hidden] {
+  display:none!important
+}
+@media(max-width:1100px) {
+  .history-page .page-header {
+    align-items:flex-start;
+    flex-wrap:wrap
+  }
+  .history-filter-grid {
+    grid-template-columns:repeat(2,minmax(0,1fr))
+  }
+}
+@media(max-width:620px) {
+  .history-page .sidebar {
+    display:block
+  }
+  .history-navigation {
+    display:flex;
+    gap:10px;
+    margin-top:15px
+  }
+  .history-navigation .sidebar-button {
+    width:auto;
+    flex:1
+  }
+  .history-page .sidebar .history-sidebar-help {
+    display:none
+  }
+  .history-page .sidebar-bottom {
+    display:none
+  }
+  .history-filter-grid {
+    gap:16px 12px
+  }
+  .history-filters input {
+    font-size:16px
+  }
+  .history-query-field {
+    grid-column:1/-1;
+    grid-row:3
+  }
+  .history-list-heading {
+    padding:18px 16px 0;
+    flex-wrap:wrap;
+    gap:6px
+  }
+  #history-capacity {
+    max-width:none;
+    text-align:left
+  }
+  .history-detail {
+    padding:18px 16px
+  }
+  .history-detail>.section-heading,.history-config {
+    display:flex;
+    flex-direction:column
+  }
+  .history-config {
+    gap:20px
+  }
+  .history-message {
+    min-width:0;
+    width:100%
+  }
+  .history-messages {grid-template-columns:1fr;width:100%}
+  .history-page footer span {
+    max-width:100%;
+    line-height:1.8
+  }
+}

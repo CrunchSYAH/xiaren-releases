@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "minimum_chrome_version": "106",
+  "name": "虾仁 · 印尼达人建联",
+  "version": "0.1.2",
+  "description": "本地达人名单、话术预览和可暂停的自动私信队列，仅支持印尼 Shopee 卖家站。",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://seller.shopee.co.id/*"],
+  "background": { "service_worker": "background.mjs", "type": "module" },
+  "icons": { "16": "icons/shrimp-16.png", "32": "icons/shrimp-32.png", "48": "icons/shrimp-48.png", "128": "icons/shrimp-128.png" },
+  "action": { "default_title": "打开达人建联工作台", "default_icon": { "16": "icons/shrimp-16.png", "32": "icons/shrimp-32.png", "48": "icons/shrimp-48.png", "128": "icons/shrimp-128.png" } },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'" }
+}

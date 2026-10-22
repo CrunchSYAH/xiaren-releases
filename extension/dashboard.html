@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>虾仁 · 印尼达人建联</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/shrimp-32.png">
+  <link rel="stylesheet" href="dashboard.css">
+  <script type="module" src="dashboard.mjs"></script>
+  <script type="module" src="update.mjs"></script>
+</head>
+<body class="dashboard-page">
+  <a class="skip-link" id="dashboard-skip" href="#main">跳到任务设置</a>
+  <aside class="sidebar" aria-label="连接与工具">
+    <a class="brand" href="dashboard.html"><span class="brand-mark" aria-hidden="true">
+      <!-- Lucide shrimp icon; ISC license in THIRD_PARTY_NOTICES.txt. -->
+      <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+        <path d="M10 2a3.28 3.28 0 003.227 1.798l6.17-.561A1 1 0 1119.614 8H8.5a6.44 6.44 0 00-5.63 9.75A6.5 6.5 0 008.5 21c1.38 0 2-.5 2.5-1"></path>
+        <path d="M10 8a8.5 8.5 0 000 8"></path>
+        <path d="M11 22c-.5-.5-1.12-1-2.5-1a1 1 0 010-5H12a7 7 0 007-7V8"></path>
+        <path d="M13 12h.01"></path>
+        <path d="M8 16c-2 0-4.5-4-4-6"></path>
+      </svg>
+    </span><span>虾仁<small>独立自用版</small></span></a>
+    <div class="sidebar-rule"></div>
+    <a class="button sidebar-button" href="dashboard.html" aria-current="page">任务工作台</a>
+    <a class="button sidebar-button secondary" href="history.html">任务记录</a>
+    <a class="button sidebar-button secondary" href="update.html" target="_blank" rel="noopener noreferrer">检查更新</a>
+    <span id="extension-version" class="sidebar-help"></span>
+    <button id="open-library" class="button sidebar-button secondary" type="button">本地达人库</button>
+    <div class="connection-heading"><span id="connection-dot" class="connection-dot"></span><span id="connection-state">正在连接扩展</span></div>
+    <h2 class="sidebar-label">当前店铺</h2>
+    <p id="shop-name" class="shop-name">尚未识别店铺</p>
+    <p id="connection-detail" class="sidebar-help">准备名单时自动识别专用页的当前店铺。</p>
+    <button id="open-page" class="button sidebar-button" type="button">打开专用 Shopee 页</button>
+    <p class="sidebar-help">在专用页面登录后，可在选择达人页应用筛选并准备名单。切换账号后请重新准备并核对店铺。</p>
+    <div class="sidebar-bottom"><span class="local-label">数据保存在本机</span><button id="export-results" class="button sidebar-button secondary" type="button">导出任务与拒绝名单</button><button id="export-diagnostics" class="button sidebar-button secondary" type="button">导出排查日志</button><p class="sidebar-help">演练与真实发送分别记录；导出文件请妥善保管。</p></div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="page-header"><div><h1>印尼达人建联</h1><p>编辑消息顺序，核对达人，再启动本机任务。</p></div><span id="mode-badge" class="mode-badge">真实发送模式</span></header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <nav class="workflow-steps" aria-label="任务配置步骤"><span id="step-one-indicator" aria-current="step"><b>1</b>消息配置</span><span id="step-two-indicator"><b>2</b>选择达人</span></nav>
+    <div class="task-layout"><div class="task-main">
+    <section id="configuration-step" class="settings" aria-labelledby="settings-heading">
+      <div class="section-heading"><h2 id="settings-heading">任务设置</h2><span id="settings-note" class="muted">真实发送，启动前请核对</span></div>
+      <section class="message-template-manager" aria-labelledby="message-template-heading">
+        <div class="message-template-heading"><h3 id="message-template-heading">消息模板</h3><span id="message-template-capacity" class="muted">仅保存在本机</span></div>
+        <div class="message-template-grid">
+          <div><label for="message-template-select">已存模板</label><div class="message-template-picker"><select id="message-template-select" aria-describedby="message-template-help"><option value="">选择已存模板</option></select><button id="message-template-refresh" class="button button-outline" type="button">刷新模板</button><button id="message-template-apply" class="button button-outline" type="button" disabled>套用</button></div></div>
+          <div><label for="message-template-name">模板名称</label><input id="message-template-name" type="text" maxlength="50" autocomplete="off" placeholder="例如：新品合作邀请" aria-describedby="message-template-help"></div>
+        </div>
+        <div class="message-template-actions"><button id="message-template-create" class="button button-outline" type="button" disabled>存为新模板</button><button id="message-template-update" class="button button-outline" type="button" disabled>保存修改</button><button id="message-template-copy" class="text-button" type="button" disabled>复制已存模板</button></div>
+        <p id="message-template-help" class="field-help">选择后点击“套用”才会替换下方消息序列；模板不保存店铺、名单、人数、间隔或模式。</p>
+        <p id="message-template-status" class="message-template-status" role="status" aria-live="polite">正在读取本机模板…</p>
+      </section>
+      <fieldset id="settings-fields">
+        <label for="task-name">任务名称 <span class="optional">选填，最多 80 字，方便查找记录</span></label><input id="task-name" type="text" maxlength="80" autocomplete="off" placeholder="例如：10 月新品合作">
+        <div class="section-heading composer-heading"><div><h3>消息顺序 <span id="message-sequence-count" class="count">2 / 10</span></h3><p class="field-help">文字、链接、图片可按顺序混排。每条图片消息限一张 PNG 或 JPEG，须小于 2 MiB；文字说明请独立成条。</p></div><button id="message-reset" class="text-button" type="button">重置消息</button></div>
+        <div id="message-editor" class="message-editor"></div><button id="message-add" class="button button-outline" type="button">＋ 新增消息</button><p id="image-library-status" class="field-help" hidden></p>
+        <div class="sending-rules"><div><label for="interval">逐人间隔（秒）</label><input id="interval" name="interval" autocomplete="off" type="number" min="0" step="any" value="10" placeholder="例如 10" inputmode="decimal"></div><div><label for="mode">操作模式</label><select id="mode" name="mode" aria-describedby="mode-help"><option value="send">真实发送 · 自动逐人提交</option><option value="dry-run">演练 · 不点击发送</option></select></div></div><p id="mode-help" class="field-help">默认真实发送；准备名单并勾选发送确认后，才可启动。</p>
+      </fieldset>
+      <div class="step-actions"><span class="muted">先核对每条内容，再选择本次达人。</span><button id="message-next" class="button button-primary" type="button">下一步：选择达人</button></div>
+    </section>
+    <section id="audience-step" hidden>
+    <section class="settings audience-settings" aria-labelledby="audience-heading"><div class="section-heading"><h2 id="audience-heading">选择达人</h2><button id="message-back" class="text-button" type="button">返回消息配置</button></div><fieldset id="source-fields">
+      <label for="source-type">名单来源</label><select id="source-type"><option value="marketplace">Shopee 达人广场</option><option value="leaderboard">Shopee 达人排行榜（从上到下）</option><option value="affiliates">指定联盟伙伴 ID（官方详情核实）</option><option value="specified">指定已加载 Shopee 用户 ID</option></select>
+      <p id="source-help" class="field-help">选择来源后打开专用 Shopee 页，再准备名单。</p>
+      <div id="library-selection" hidden><p id="library-selection-status" class="field-help" role="status"></p><button id="library-selection-apply" class="button button-outline" type="button">套用达人库选择</button></div>
+      <div id="web-filter-fields" class="web-filter-fields">
+        <div class="web-filter-heading"><label class="check-label" for="web-filters-enabled"><input id="web-filters-enabled" type="checkbox" checked disabled><span>应用 Shopee 网页筛选</span></label><button id="web-filter-refresh" class="text-button" type="button">读取页面筛选</button></div>
+        <p id="web-filter-status" class="field-help" role="status">打开专用页面后读取真实筛选选项。</p>
+        <div class="web-filter-grid">
+          <div class="chip-filter"><span class="chip-filter-label">商品类目</span><div id="web-filter-category-options" class="chip-options" role="radiogroup" aria-label="商品类目" aria-disabled="true"></div><p id="web-filter-category-empty" class="chip-empty" hidden></p></div>
+          <div class="chip-filter"><span class="chip-filter-label">社交媒体渠道</span><div id="web-filter-channel-options" class="chip-options" role="radiogroup" aria-label="社交媒体渠道" aria-disabled="true"></div><p id="web-filter-channel-empty" class="chip-empty" hidden></p></div>
+        </div>
+        <p class="field-help">勾选后，点击“准备名单”会先在专用 Shopee 页应用上述条件；未勾选时沿用页面条件。粉丝等其他条件仍在 Shopee 页面选择。</p>
+        <label class="check-label start-position" for="start-current"><input id="start-current" type="checkbox" checked><span>从当前页面位置准备</span></label><p id="start-current-help" class="field-help">广场从屏幕第一位可见达人开始，排行榜从当前页开始，继续排除已提交和拒绝记录。使用此选项前，请先在 Shopee 应用相同筛选并定位；筛选变化会重置位置。</p>
+      </div>
+      <div id="source-ids-field" hidden><label for="source-ids">Shopee 用户 ID</label><textarea id="source-ids" rows="3" autocomplete="off" placeholder="输入数字用户 ID，用逗号、空格或换行分隔"></textarea><p id="source-ids-count" class="field-help">去重后 0 人；最多 200 人。请填写 Shopee 用户 ID，并非联盟伙伴 ID。</p></div>
+      <div id="source-affiliate-field" hidden><label for="source-affiliate-ids">联盟伙伴 ID</label><textarea id="source-affiliate-ids" rows="3" autocomplete="off" placeholder="输入联盟伙伴数字 ID，用逗号、空格或换行分隔"></textarea><p id="source-affiliate-count" class="field-help">每个 ID 通过官方详情核实，按输入顺序准备；不以同名或数字相等推断用户身份。</p></div>
+      <div class="audience-filter-grid"><div><label for="source-includes">达人名称包含 <span class="optional">选填</span></label><input id="source-includes" type="text" maxlength="100" autocomplete="off" placeholder="仅保留名称包含此内容的达人"></div><div><label for="source-excludes">达人名称排除 <span class="optional">选填</span></label><input id="source-excludes" type="text" maxlength="100" autocomplete="off" placeholder="排除名称包含此内容的达人"></div><div id="marketplace-count-field"><label for="limit">本次目标人数</label><input id="limit" name="limit" autocomplete="off" type="number" min="1" max="200" step="1" value="100" inputmode="numeric"></div></div>
+    </fieldset></section>
+    <section class="workbench" aria-label="名单与消息核对">
+      <div class="roster-pane">
+        <div class="section-heading roster-heading"><div><h2>达人名单 <span id="roster-count" class="count">0</span></h2><p id="roster-help" class="muted">广场和排行榜多准备约 10% 候选，默认勾选前目标人数，候选最多 200 人。</p></div><div class="preparation-actions"><button id="prepare-list" class="button button-outline" type="button">准备名单</button><button id="cancel-preparation" class="text-button" type="button" hidden>取消准备</button></div></div>
+        <div class="roster-tools"><span id="collection-status" class="mini-tag">尚未准备</span><span id="selection-count">目标 100 人</span></div><div class="collection-track" aria-hidden="true"><div id="collection-progress"></div></div><p id="collection-reason" class="collection-reason" role="status">填写人数后准备名单，备齐才可启动。</p>
+        <div id="selection-tools" class="selection-tools" hidden><button id="refill-selection" class="button button-outline" type="button">补足到目标人数</button><button id="reset-selection" class="text-button" type="button">恢复默认选择</button><button id="extend-candidates" class="text-button" type="button">继续加载候选</button></div>
+        <div class="table-scroll"><table><caption class="sr-only">目标达人名单</caption><thead><tr><th class="checkbox-column" scope="col"><span class="sr-only">选择</span></th><th scope="col">达人</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody id="roster-body"></tbody></table><div id="roster-empty" class="empty-state"><span class="empty-symbol" aria-hidden="true">＋</span><h3>按人数准备名单</h3><p>选择来源与筛选条件，填写本次人数后点击“准备名单”。工具会应用网页筛选并排除已有联系或拒绝记录。</p></div></div>
+        <nav class="roster-pagination" aria-label="达人名单分页"><span id="roster-range">共 0 人</span><div class="pagination-controls"><button id="roster-previous" class="button button-outline" type="button" disabled>上一页</button><span id="roster-page" role="status" aria-live="polite">第 1 / 1 页</span><button id="roster-next" class="button button-outline" type="button" disabled>下一页</button></div></nav>
+      </div>
+    </section></section></div>
+      <aside class="preview-pane sequence-preview" aria-labelledby="preview-heading"><div class="section-heading"><div><h2 id="preview-heading">逐条预览</h2><p id="preview-sequence-count" class="field-help">共 2 条消息</p></div></div><div id="message-preview-list"></div><p id="preview-note" class="field-help">发送时会自动替换每位达人的姓名。</p><div id="launch-area" class="launch-area" hidden><label id="consent-label" class="consent" hidden><input id="send-consent" type="checkbox"><span id="consent-copy">已核对店铺、锁定名单及每条消息，同意按顺序提交</span></label><button id="start-button" aria-describedby="launch-help" class="button button-primary" type="button" disabled>启动演练队列</button><p id="launch-help" class="field-help">先按目标人数准备名单，再启动任务。</p></div></aside>
+    </div>
+    <section class="queue-section" aria-labelledby="queue-heading"><div class="section-heading"><div><h2 id="queue-heading">队列进度 <span id="queue-status" class="mini-tag">尚未开始</span></h2><p id="queue-context" class="muted">启动任务后，这里显示当前处理项和核对入口。</p></div><div class="queue-controls"><button id="pause-button" class="button button-outline" type="button" hidden>暂停队列</button><button id="stop-button" class="button button-outline" type="button" hidden>停止队列</button><button id="resume-button" class="button button-primary" type="button" hidden>继续本任务</button><button id="finish-button" class="button button-outline" type="button" hidden>结束本任务</button></div></div><div class="progress-track"><div id="progress-fill"></div></div><p id="progress-summary" class="progress-summary">尚无任务</p><p id="queue-duration" class="queue-duration" hidden></p><p id="queue-duration-help" class="field-help" hidden>从任务启动起计，包含逐人间隔和暂停时间；任务结束后固定。</p><p id="queue-reason" class="queue-reason" hidden></p><p id="queue-guidance" class="field-help" hidden></p><button id="queue-show-uncertain" class="button button-outline" type="button" hidden>查看待核对达人</button><ul id="queue-items" class="queue-items" aria-label="逐人处理结果"></ul><nav class="queue-pagination" aria-label="队列达人分页"><span id="queue-range">共 0 人</span><div class="pagination-controls"><button id="queue-previous" class="button button-outline" type="button" disabled>上一页</button><span id="queue-page" role="status" aria-live="polite">第 1 / 1 页</span><button id="queue-next" class="button button-outline" type="button" disabled>下一页</button></div></nav></section>
+    <details class="deny-section"><summary>本店铺拒绝名单 <span id="deny-count" class="count">0</span></summary><p class="field-help">加入后会在后续任务中跳过；解除拒绝不会清除历史防重发记录。包含已不在当前页面的达人。</p><p id="deny-empty" class="muted">当前店铺没有拒绝记录。</p><ul id="deny-items" class="deny-items"></ul></details>
+    <footer>虾仁 · 印尼达人建联<span>已提交表示完成发送点击，不核对平台接受、送达或已读。</span></footer>
+  </main>
+</body>
+</html>

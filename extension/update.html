@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>更新虾仁</title>
+  <link rel="icon" href="icons/shrimp-32.png">
+  <link rel="stylesheet" href="dashboard.css">
+  <script type="module" src="update.mjs"></script>
+</head>
+<body>
+  <main style="max-width:720px;margin:48px auto;padding:24px">
+    <h1>更新虾仁</h1>
+    <p id="extension-version" class="sidebar-help">正在读取当前版本</p>
+    <p>先在所有店铺结束当前任务，再更新。更新会替换扩展文件。</p>
+    <ol>
+      <li>打开 GitHub 最新版本，查看版本号和更新说明。</li>
+      <li>首次安装：下载 ZIP，解压到固定目录，在 Chrome 扩展管理页加载其中的 extension 文件夹。</li>
+      <li>以后更新：在原安装目录双击 update.cmd，从 GitHub 获取新版。脚本会先备份旧版，再替换 extension 文件夹。</li>
+      <li>在每个 Chrome profile 打开 chrome://extensions，找到虾仁并点击“重新加载”，再重新打开工作台核对版本号。</li>
+    </ol>
+    <p>Chrome 本地扩展需要手动重新加载。请保持原安装路径，不卸载扩展，以保留该扩展的本地数据。</p>
+    <p id="release-unavailable" role="status">发布仓库尚未配置，请联系发布者获取正式安装包。</p>
+    <a id="latest-release" class="button" target="_blank" rel="noopener noreferrer" hidden>前往 GitHub 获取最新版</a>
+    <p><a href="dashboard.html">返回工作台</a></p>
+  </main>
+</body>
+</html>

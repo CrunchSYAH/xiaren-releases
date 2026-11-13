@@ -1,5 +1,5 @@
 import { releaseRepository } from './release-config.mjs';
-import { selectRelease, fetchLatestRelease, downloadAsset, verifyArchive, readArchive, planInstall, releaseAssetName, safeName, UpdaterError } from './updater.mjs';
+import { selectRelease, resolveLatestRelease, fetchLatestRelease, downloadAsset, verifyArchive, readArchive, planInstall, releaseAssetName, safeName, UpdaterError } from './updater.mjs';
 
 const runtimeVersion = globalThis.chrome?.runtime?.getManifest?.().version || '预览';
 const versionLabel = document.getElementById('extension-version');
@@ -101,8 +101,17 @@ async function check() {
   setStatus('正在读取 GitHub 最新版本…');
   setDetail('');
   try {
-    const release = await fetchLatestRelease();
-    latest = selectRelease(release, currentManifest.version);
+    // The releases page redirect carries the version and needs no API quota, so
+    // it works even when api.github.com is rate limited or filtered. The API is
+    // only a fallback.
+    let found;
+    try {
+      found = await resolveLatestRelease(currentManifest.version);
+    } catch (first) {
+      try { found = selectRelease(await fetchLatestRelease(), currentManifest.version); }
+      catch (second) { throw new UpdaterError(`${first.message}；备用接口：${second.message}`); }
+    }
+    latest = found;
     if (latest.upToDate) {
       setStatus(`已是最新版本 ${currentManifest.version}。`, 'success');
       if (ui.install) ui.install.hidden = true;

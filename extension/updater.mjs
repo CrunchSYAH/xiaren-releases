@@ -53,11 +53,40 @@ export function selectRelease(release, currentVersion, repository = releaseRepos
     notes: typeof release.html_url === 'string' && release.html_url.startsWith('https://github.com/') ? release.html_url : null };
 }
 
+// Same release shape as selectRelease, but the version comes from the tag that
+// github.com/releases/latest redirects to. That page needs no API quota and is
+// the same host the user already opens, so a blocked or rate-limited
+// api.github.com no longer breaks the update check.
+export function releaseFromTag(tag, currentVersion, repository = releaseRepository) {
+  if (!safeName(repository)) throw new UpdaterError('发布仓库尚未配置');
+  const match = /^v(\d+\.\d+\.\d+)$/.exec(String(tag || ''));
+  if (!match) throw new UpdaterError('最新发布的版本号格式无法识别');
+  const version = match[1], name = releaseAssetName(version);
+  const base = `https://github.com/${repository}/releases/download/${tag}/`;
+  return { version, tag, name, upToDate: compareVersions(version, currentVersion) <= 0,
+    zipUrl: base + name, checksumUrl: base + `${name}.sha256`, size: null,
+    notes: `https://github.com/${repository}/releases/tag/${tag}` };
+}
+
+export async function resolveLatestRelease(currentVersion, fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl(`https://github.com/${releaseRepository}/releases/latest`, { redirect: 'follow', cache: 'no-store' });
+  const finalUrl = typeof response?.url === 'string' ? response.url : '';
+  try { if (response?.body && typeof response.body.cancel === 'function') await response.body.cancel(); } catch { /* Body already gone. */ }
+  if (!response?.ok) throw new UpdaterError(`读取最新版本失败（HTTP ${response?.status ?? '未知'}）`);
+  const match = /\/releases\/tag\/(v\d+\.\d+\.\d+)\/?$/.exec(finalUrl);
+  if (!match) throw new UpdaterError('未能从发布页识别最新版本号');
+  return releaseFromTag(match[1], currentVersion);
+}
+
 export async function fetchLatestRelease(fetchImpl = globalThis.fetch) {
   const response = await fetchImpl(`https://api.github.com/repos/${releaseRepository}/releases/latest`, {
     headers: { Accept: 'application/vnd.github+json' }, cache: 'no-store', redirect: 'follow',
   });
-  if (!response.ok) throw new UpdaterError(`读取最新发布失败（HTTP ${response.status}）`);
+  if (!response.ok) {
+    let detail = '';
+    try { detail = (await response.text()).replace(/\s+/g, ' ').slice(0, 120); } catch { /* Status only. */ }
+    throw new UpdaterError(`读取最新发布失败（HTTP ${response.status}${detail ? '：' + detail : ''}）`);
+  }
   return response.json();
 }
 

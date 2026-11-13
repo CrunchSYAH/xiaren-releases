@@ -4,6 +4,11 @@
 import { releaseRepository } from './release-config.mjs';
 
 export const RELEASE_HOSTS = ['https://api.github.com/', 'https://github.com/', 'https://objects.githubusercontent.com/', 'https://release-assets.githubusercontent.com/'];
+// A release may only use permissions this project has reviewed. Adding one of
+// these is allowed (for example the updater hosts in 0.1.3), anything else is
+// refused, and a release may never drop a permission the user already granted.
+const KNOWN_PERMISSIONS = ['storage', 'scripting'];
+const KNOWN_HOST_PERMISSIONS = ['https://seller.shopee.co.id/*', ...RELEASE_HOSTS.map(host => `${host}*`)];
 export const MAX_ARCHIVE_BYTES = 20 * 1024 * 1024, MAX_FILES = 200;
 const UPDATER_FILES = ['update.cmd', 'update.ps1', 'release.json', 'README.txt'];
 const FORBIDDEN_MANIFEST_FIELDS = ['optional_permissions', 'optional_host_permissions', 'content_scripts', 'externally_connectable', 'update_url'];
@@ -115,10 +120,13 @@ export async function readArchive(bytes) {
     const method = u16(bytes, cursor + 10), compressedSize = u32(bytes, cursor + 20), size = u32(bytes, cursor + 24);
     const nameLength = u16(bytes, cursor + 28), extraLength = u16(bytes, cursor + 30), commentLength = u16(bytes, cursor + 32);
     const localOffset = u32(bytes, cursor + 42);
-    const name = new TextDecoder().decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength));
+    const decoded = new TextDecoder().decode(bytes.subarray(cursor + 46, cursor + 46 + nameLength));
     cursor += 46 + nameLength + extraLength + commentLength;
+    // Windows archivers store DOS separators in the central directory; normalize
+    // before validating so `..` and drive prefixes are still rejected.
+    const name = decoded.replace(/\\/g, '/');
     if (name.endsWith('/')) continue;
-    if (name.includes('\\') || name.includes('..') || name.startsWith('/') || files.has(name)) throw new UpdaterError('安装包包含不安全路径');
+    if (name.includes('..') || name.startsWith('/') || /^[A-Za-z]:/.test(name) || files.has(name)) throw new UpdaterError('安装包包含不安全路径');
     if (u32(bytes, localOffset) !== 0x04034b50) throw new UpdaterError('安装包条目已损坏');
     const dataStart = localOffset + 30 + u16(bytes, localOffset + 26) + u16(bytes, localOffset + 28);
     if (dataStart + compressedSize > bytes.length) throw new UpdaterError('安装包条目已损坏');
@@ -167,8 +175,13 @@ export function validateManifest(next, current) {
   if (!version) throw new UpdaterError('安装包的版本号格式无效');
   if (compareVersions(next.version, current.version) <= 0) throw new UpdaterError('安装包版本不高于当前版本');
   for (const field of FORBIDDEN_MANIFEST_FIELDS) if (next[field] !== undefined) throw new UpdaterError(`安装包包含不允许的清单字段：${field}`);
-  if (JSON.stringify(next.permissions || []) !== JSON.stringify(current.permissions || [])) throw new UpdaterError('安装包申请的权限与当前版本不一致');
-  if (JSON.stringify(next.host_permissions || []) !== JSON.stringify(current.host_permissions || [])) throw new UpdaterError('安装包申请的站点权限与当前版本不一致');
+  const list = value => Array.isArray(value) ? value : [];
+  const unknown = (value, known) => list(value).filter(item => !known.includes(item));
+  const dropped = (value, currentValue) => list(currentValue).filter(item => !list(value).includes(item));
+  if (unknown(next.permissions, KNOWN_PERMISSIONS).length) throw new UpdaterError('安装包申请了未审阅的扩展权限');
+  if (unknown(next.host_permissions, KNOWN_HOST_PERMISSIONS).length) throw new UpdaterError('安装包申请了未审阅的站点权限');
+  if (dropped(next.permissions, current.permissions).length) throw new UpdaterError('安装包移除了当前已授予的扩展权限');
+  if (dropped(next.host_permissions, current.host_permissions).length) throw new UpdaterError('安装包移除了当前已授予的站点权限');
   const currentKey = typeof current.key === 'string' ? current.key : '';
   const nextKey = typeof next.key === 'string' ? next.key : '';
   if (currentKey && nextKey && currentKey !== nextKey) throw new UpdaterError('安装包的扩展密钥不一致');

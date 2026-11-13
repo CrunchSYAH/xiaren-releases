@@ -2,8 +2,8 @@ import { readdir, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { releaseRepository } from '../extension/release-config.mjs';
+import { createZip } from './zip-utils.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(releaseRepository)) throw new Error('Configure a verified release repository first.');
@@ -42,11 +42,18 @@ await writeFile(path.join(folder, 'README.txt'), '\ufeff' + [
   `发布地址：https://github.com/${releaseRepository}/releases/latest`,
 ].join('\r\n'), { flag: 'wx' });
 const zip = path.join(path.dirname(folder), `xiaren-chrome-v${version}.zip`);
-const ps = "$ErrorActionPreference='Stop'; Compress-Archive -Path (Join-Path $env:XIAREN_STAGE '*') -DestinationPath $env:XIAREN_ZIP -CompressionLevel Optimal";
-const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', ps], {
-  env: { ...process.env, XIAREN_STAGE: folder, XIAREN_ZIP: zip }, encoding: 'utf8',
-});
-if (result.status !== 0) throw new Error(result.stderr || 'Packaging failed; existing packages are never overwritten.');
+// Built in-process so entry names always use forward slashes. Windows
+// Compress-Archive writes DOS separators, which unpack badly outside Explorer.
+const entries = [];
+async function collect(relative = '') {
+  for (const entry of await readdir(path.join(folder, relative), { withFileTypes: true })) {
+    const target = relative ? `${relative}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) await collect(target);
+    else entries.push([target, await readFile(path.join(folder, target))]);
+  }
+}
+await collect();
+await createZip(zip, entries);
 const digest = createHash('sha256').update(await readFile(zip)).digest('hex');
 await writeFile(`${zip}.sha256`, `${digest}  ${path.basename(zip)}\n`, { flag: 'wx' });
-console.log(JSON.stringify({ version, folder, zip, sha256: digest }, null, 2));
+console.log(JSON.stringify({ version, folder, zip, files: entries.length, sha256: digest }, null, 2));

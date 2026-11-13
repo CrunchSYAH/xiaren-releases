@@ -56,7 +56,7 @@ function normalizeConfig(config) {
     if (config.productLink !== undefined) content.productLink = normalizeLink(config.productLink);
   }
   if (config.taskName !== undefined) content.taskName = normalizeTaskName(config.taskName);
-  if (typeof config.intervalSeconds !== 'number' || !Number.isFinite(config.intervalSeconds) || config.intervalSeconds <= 0) throw new Error('发送间隔必须是正有限数');
+  if (typeof config.intervalSeconds !== 'number' || !Number.isFinite(config.intervalSeconds) || config.intervalSeconds < 1) throw new Error('发送间隔必须是不小于1秒的有限数');
   if (!Number.isInteger(config.limit) || config.limit <= 0) throw new Error('单次上限必须是正整数');
   if (!['dry-run', 'send'].includes(config.mode)) throw new Error('任务模式无效');
   const target = {};

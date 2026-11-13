@@ -8,6 +8,12 @@ export const rosterSignature = creators => JSON.stringify(creators.map(({ id, na
 const eligible = (state, shopId, row) => row.chatAvailable === true &&
   !Object.hasOwn(state.history?.[shopId] || {}, row.id) && !Object.hasOwn(state.denied?.[shopId] || {}, row.id);
 const candidateTargetFor = target => Math.min(200, target + Math.ceil(target / 10));
+// The site appends ten rows per request and each request can take seconds on a
+// slow network, so a roster counts as stalled only after this silence.
+export const STALL_MS = 90_000;
+// Total preparation budget. Expiring it keeps every candidate collected so far
+// and lets the user continue instead of starting the roster over.
+export const BUDGET_MS = 1_800_000;
 const selectable = c => c?.selectionVersion === 1 && ['marketplace', 'leaderboard'].includes(c.source?.type);
 
 function withSelection(c, ids, excludedIds = c.excludedIds) {
@@ -78,7 +84,7 @@ export function updateCollection(collection, page, state, binding, now) {
   if (c.filterContext === undefined && typeof page.list?.filterContext === 'string' && page.list.filterContext) c.filterContext = page.list.filterContext;
   if (!c.observed.length && !page.list?.loading && typeof page.list?.startId === 'string' && page.list.startId) c.startId = page.list.startId;
   if (c.source.type === 'marketplace' && c.source.startPosition === 'current') {
-    if (!c.observed.length && page.list?.loading) return now - c.progressAt >= 45_000 ? invalid('当前位置页面加载超时，请重新准备名单') : c;
+    if (!c.observed.length && page.list?.loading) return now - c.progressAt >= STALL_MS ? invalid('当前位置页面加载超时，请重新准备名单') : c;
     if (!page.list?.supported || typeof c.startId !== 'string' || !c.startId || !rows.some(row => row.id === c.startId) || (!c.observed.length && rows.filter(row => row.id === c.startId).length !== 1)) return invalid('当前屏幕没有可靠且唯一的可见达人位置，请定位后重新准备名单');
   }
   if (c.source.type === 'affiliates') {
@@ -119,7 +125,7 @@ export function updateCollection(collection, page, state, binding, now) {
     if (selectable(c)) c.selectionInitialized = true;
     return c;
   }
-  const reason = page.list?.truncated ? '加载名单达到检查上限' : !page.list?.supported ? '当前页面加载结构无法可靠识别' : page.list.hasMore === false && !page.list.loading ? '页面已无更多达人' : now - c.progressAt >= 45_000 ? '页面加载停滞，未取得更多达人' : now - c.startedAt >= 600_000 ? '名单准备超时' : null;
+  const reason = page.list?.truncated ? '加载名单达到检查上限' : !page.list?.supported ? '当前页面加载结构无法可靠识别' : page.list.hasMore === false && !page.list.loading ? '页面已无更多达人' : now - c.progressAt >= STALL_MS ? '页面加载停滞，未取得更多达人' : now - c.startedAt >= BUDGET_MS ? '名单准备超时' : null;
   if (reason) {
     if (selectable(c) && page.list?.supported && !page.list.truncated && page.list.hasMore === false && !page.list.loading && c.candidateCount >= c.target) {
       c.status = 'ready'; c.action = null; c.reason = `候选缓冲不足：目标 ${c.target} 人，仅准备 ${c.candidateCount} 名候选；仍须选择 ${c.target} 人`;
@@ -168,4 +174,14 @@ export function extendCandidates(c, now) {
   if (c.candidates.length >= 200) throw new Error('候选已达200人上限，请手动勾回已取消人员');
   return { ...c, status: 'collecting', candidateTarget: Math.min(200, c.candidates.length + Math.ceil(c.target / 10)),
     action: null, startedAt: now, progressAt: now, updatedAt: now, selectionRevision: c.selectionRevision + 1, reason: '正在继续准备候选，原选择保留' };
+}
+
+// A roster that ran out of time or stalled keeps its candidates and selection;
+// continuing reuses the same frozen pool instead of restarting the collection.
+export function continueCollection(c, now) {
+  if (!c || c.status !== 'insufficient' || !selectable(c)) throw new Error('当前名单不能继续准备，请重新准备名单');
+  if (c.candidates.length >= 200) throw new Error('候选已达200人上限，请手动勾回已取消人员');
+  return { ...c, status: 'collecting', action: null, startedAt: now, progressAt: now, updatedAt: now,
+    candidateTarget: Math.max(c.candidateTarget, Math.min(200, c.candidates.length + Math.ceil(c.target / 10))),
+    reason: '正在继续准备候选人，已选与候选保留' };
 }

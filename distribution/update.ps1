@@ -70,12 +70,12 @@ try {
     if ($nextRelease.repository -cne $releaseInfo.repository -or $nextRelease.version -cne $next.version -or $next.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Package identity mismatch.' }
     if ($releaseVersion -and $next.version -cne $releaseVersion) { throw 'Release version mismatch.' }
     if ([version]$next.version -le [version]$current.version) { throw 'Refusing to install the same or an older version.' }
-    if ($next.manifest_version -ne 3 -or $next.name -cne $current.name -or (@($next.permissions) -join ',') -cne 'storage,scripting' -or (@($next.host_permissions) -join ',') -cne 'https://seller.shopee.co.id/*') { throw 'Unexpected extension identity or permissions.' }
+    if ($next.manifest_version -ne 3 -or $next.name -cne $current.name -or (@($next.permissions) -join ',') -cne 'storage,scripting' -or (@($next.host_permissions) -join ',') -cne 'https://seller.shopee.co.id/*,https://api.github.com/*,https://github.com/*,https://objects.githubusercontent.com/*,https://release-assets.githubusercontent.com/*') { throw 'Unexpected extension identity or permissions.' }
     foreach ($forbidden in @('optional_permissions', 'optional_host_permissions', 'content_scripts', 'externally_connectable', 'update_url')) {
         if ($null -ne $next.PSObject.Properties[$forbidden]) { throw "Unexpected manifest field: $forbidden" }
     }
     if ($next.key -cne $current.key) { throw 'Extension key must not change.' }
-    foreach ($required in @('background.mjs', 'dashboard.html', 'dashboard.mjs', 'update.html', 'release-config.mjs')) {
+    foreach ($required in @('background.mjs', 'dashboard.html', 'dashboard.mjs', 'update.html', 'updater.mjs', 'release-config.mjs')) {
         if (-not (Test-Path -LiteralPath (Join-Path $nextPath $required) -PathType Leaf)) { throw "Missing file: $required" }
     }
     $rootFiles = @('update.cmd', 'update.ps1', 'release.json', 'README.txt')

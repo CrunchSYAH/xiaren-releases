@@ -18,6 +18,15 @@ let tasks = [], page = 1, listReady = false;
 let listSequence = 0, detailSequence = 0, exportSequence = 0;
 let selectedTaskId = null, selectedButton = null;
 let exporting = false;
+// Each keystroke used to re-read and re-validate every archived task. Debounce
+// the search box and leave IME composition alone so typing Chinese does not
+// fire a request per candidate character.
+const QUERY_DELAY = 250;
+let queryTimer = 0, composing = false;
+function scheduleQueryLoad() {
+  clearTimeout(queryTimer);
+  queryTimer = setTimeout(() => { queryTimer = 0; void loadList(); }, QUERY_DELAY);
+}
 
 function create(tag, className, value) {
   const node = document.createElement(tag);
@@ -136,6 +145,7 @@ function renderCapacity(capacity = {}) {
   ui['history-capacity'].textContent = `本机保留 ${count} / ${limit} 条任务${count >= limit || bytesFull ? '；容量已满，请先导出记录，新任务将被阻止。' : '；容量满时会阻止新任务，请定期导出。'}`;
 }
 async function loadList() {
+  clearTimeout(queryTimer); queryTimer = 0;
   const sequence = ++listSequence;
   closeDetail();
   listReady = false;
@@ -256,7 +266,9 @@ ui['history-skip'].addEventListener('click', event => {
   ui.main.focus();
 });
 for (const id of ['history-shop', 'history-mode', 'history-status', 'history-from', 'history-to']) ui[id].addEventListener('change', loadList);
-ui['history-query'].addEventListener('input', loadList);
+ui['history-query'].addEventListener('input', () => { if (!composing) scheduleQueryLoad(); });
+ui['history-query'].addEventListener('compositionstart', () => { composing = true; });
+ui['history-query'].addEventListener('compositionend', () => { composing = false; scheduleQueryLoad(); });
 ui['history-refresh'].addEventListener('click', loadList);
 ui['history-export'].addEventListener('click', () => exportRecords());
 ui['detail-export'].addEventListener('click', () => exportRecords(true));

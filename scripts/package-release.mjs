@@ -34,9 +34,9 @@ await writeFile(path.join(folder, 'release.json'), JSON.stringify({ repository: 
 await writeFile(path.join(folder, 'README.txt'), '\ufeff' + [
   `虾仁 v${version}`,
   '首次安装：完整解压到固定目录，Chrome 开发者模式加载其中的 extension 文件夹。',
-  '更新：所有 profile 的任务结束后，在原安装目录双击 update.cmd，输入 UPDATE。',
-  '脚本下载最新正式版、校验 SHA256，保留旧版在 backups 文件夹。',
-  '随后在每个 profile 的 chrome://extensions 中点击虾仁的“重新加载”。',
+  '更新：所有 profile 的任务结束后，打开工作台的“更新虾仁”页面，点击“检查更新”→“自动更新”。',
+  '自动更新会下载并校验最新正式版，只替换 extension 文件夹并自动重新加载扩展；首次使用需在更新页选择一次 extension 文件夹。',
+  '手动兜底：在原安装目录双击 update.cmd，输入 UPDATE；脚本会先备份再替换，随后在各 profile 的 chrome://extensions 点击“重新加载”。',
   '保持安装目录不变，不卸载扩展；本地数据由各 profile 独立保存。',
   '真实 Shopee 发送、发图及双 profile 实机运行仍未验收。',
   `发布地址：https://github.com/${releaseRepository}/releases/latest`,

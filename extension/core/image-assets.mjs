@@ -136,6 +136,9 @@ function checkCapacity(store) {
   return store;
 }
 
+// The only entry point that touches raw storage. It re-derives every digest, so
+// a store whose declared digest no longer matches its bytes is rejected as a
+// whole: image operations fail closed instead of half working.
 export async function readImageAssets(value) {
   if (value === undefined) return emptyImageAssets();
   try {
@@ -154,25 +157,40 @@ export async function readImageAssets(value) {
   } catch { throw corrupt(); }
 }
 
+// Projections over a store that readImageAssets already returned. They never
+// re-verify, so one request can list, append and read without hashing the whole
+// library repeatedly. Never pass raw storage to them.
+export function listVerifiedAssets(store) {
+  const assets = store.assets.map(({ dataUrl, ...metadata }) => metadata).sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+  return { version: 1, assets, capacity: capacity(store) };
+}
+
+export function getVerifiedAsset(store, id) {
+  const canonicalId = assetId(id);
+  return store.assets.find(asset => asset.id === canonicalId) || null;
+}
+
 export async function listImageAssets(store) {
-  const saved = await readImageAssets(store);
-  const assets = saved.assets.map(({ dataUrl, ...metadata }) => metadata).sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
-  return { version: 1, assets, capacity: capacity(saved) };
+  return listVerifiedAssets(await readImageAssets(store));
+}
+
+// Appends to a store that readImageAssets already returned: only the new image
+// is decoded and digested, the existing library is not verified twice.
+export async function appendVerifiedAsset(store, draft, options = {}) {
+  const fields = await imageFields(draft);
+  const existing = store.assets.find(asset => asset.sha256 === fields.sha256);
+  if (existing) return { store, assetId: existing.id, reused: true };
+  const { id, now } = options || {};
+  const canonicalId = assetId(id);
+  if (store.assets.some(asset => asset.id === canonicalId)) throw new Error('图片资产ID已存在，请刷新后重试');
+  const asset = { id: canonicalId, ...fields, createdAt: validTime(now) };
+  return { store: checkCapacity({ version: 1, assets: [...store.assets, asset] }), assetId: canonicalId, reused: false };
 }
 
 export async function addImageAsset(store, draft, options = {}) {
-  const saved = await readImageAssets(store), fields = await imageFields(draft);
-  const existing = saved.assets.find(asset => asset.sha256 === fields.sha256);
-  if (existing) return { store: saved, assetId: existing.id, reused: true };
-  const { id, now } = options || {};
-  const canonicalId = assetId(id);
-  if (saved.assets.some(asset => asset.id === canonicalId)) throw new Error('图片资产ID已存在，请刷新后重试');
-  const asset = { id: canonicalId, ...fields, createdAt: validTime(now) };
-  return { store: checkCapacity({ version: 1, assets: [...saved.assets, asset] }), assetId: canonicalId, reused: false };
+  return appendVerifiedAsset(await readImageAssets(store), draft, options);
 }
 
 export async function getImageAsset(store, id) {
-  const canonicalId = assetId(id);
-  const saved = await readImageAssets(store);
-  return saved.assets.find(asset => asset.id === canonicalId) || null;
+  return getVerifiedAsset(await readImageAssets(store), id);
 }

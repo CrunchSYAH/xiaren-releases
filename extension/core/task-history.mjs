@@ -77,8 +77,10 @@ export function archiveTask(history, task) {
   return next;
 }
 
-function mergedTasks(history, currentTask) {
-  const records = new Map(readTaskHistory(history).tasks.map(task => [task.id, task]));
+// Callers read the store once and pass it in: every read re-validates all
+// archived tasks, so a second read would double the work of one request.
+function mergedTasks(saved, currentTask) {
+  const records = new Map(saved.tasks.map(task => [task.id, task]));
   if (currentTask) { const current = snapshotTask(currentTask); records.set(current.id, current); }
   return [...records.values()].sort((a, b) => (b.createdAt ?? b.updatedAt ?? 0) - (a.createdAt ?? a.updatedAt ?? 0) || a.id.localeCompare(b.id));
 }
@@ -116,19 +118,19 @@ function summary(task) {
 }
 
 export function listTaskHistory(history, currentTask, filters = {}) {
-  const all = mergedTasks(history, currentTask);
+  const saved = readTaskHistory(history);
+  const all = mergedTasks(saved, currentTask);
   const tasks = selectedTasks(all, filters).map(summary);
   const shops = new Map();
   for (const task of all) if (!shops.has(task.config.shop.id)) shops.set(task.config.shop.id, { ...task.config.shop });
-  const saved = readTaskHistory(history);
   return { version: 1, tasks, total: tasks.length, shops: [...shops.values()], capacity: { count: saved.tasks.length, limit: LIMIT, maxBytes: MAX_BYTES, bytes: bytes(saved) } };
 }
 
 export function getTaskHistoryDetail(history, currentTask, taskId) {
   if (!validText(taskId)) throw new Error('请选择有效的任务记录');
-  return mergedTasks(history, currentTask).find(task => task.id === taskId) || null;
+  return mergedTasks(readTaskHistory(history), currentTask).find(task => task.id === taskId) || null;
 }
 
 export function exportTaskHistory(history, currentTask, filters = {}, exportedAt = Date.now()) {
-  return { version: 1, exportedAt, tasks: selectedTasks(mergedTasks(history, currentTask), filters) };
+  return { version: 1, exportedAt, tasks: selectedTasks(mergedTasks(readTaskHistory(history), currentTask), filters) };
 }

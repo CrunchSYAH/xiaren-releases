@@ -119,6 +119,11 @@ function selectionEditable() {
   return candidateSelectionAvailable && available && (!busy || selectionSaving) && !taskOpen() && connected() && !sourceDirty && !needsPreparation
     && collectionSourceMatches(c) && c?.selectionVersion === 1 && c.status === 'ready' && !c.pagePending;
 }
+function selectionResumable() {
+  const c = collection();
+  return candidateSelectionAvailable && available && !busy && !taskOpen() && connected() && !sourceDirty && !needsPreparation
+    && collectionSourceMatches(c) && c?.selectionVersion === 1 && c.status === 'insufficient' && (c.candidates?.length || 0) > 0;
+}
 function selectionView() {
   const c = collection();
   if (!pendingSelections.length || c?.id !== pendingSelections[0].collectionId) return c;
@@ -160,7 +165,7 @@ async function saveSelections() {
   }
 }
 function changeSelection(type, values = {}) {
-  if (!selectionEditable()) { renderRoster(); return; }
+  if (!selectionEditable() && !(type === 'panel:extend-candidates' && selectionResumable())) { renderRoster(); return; }
   const c = collection(), revision = sourceEditRevision;
   resetConfirmation();
   if (type === 'panel:select') {
@@ -670,7 +675,7 @@ function hydrateSource(source) {
 function getMessageSettings() {
   const messages = readDraftMessages();
   const intervalSeconds = Number(ui.interval.value);
-  if (!ui.interval.value.trim() || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) throw new Error('请填写大于 0 的逐人间隔。');
+  if (!ui.interval.value.trim() || !Number.isFinite(intervalSeconds) || intervalSeconds < 1) throw new Error('请填写不小于 1 秒的逐人间隔。');
   const taskName = ui['task-name'].value.trim();
   if (taskName.length > 80) throw new Error('任务名称最多 80 字。');
   return { messages, intervalSeconds, ...(taskName ? { taskName } : {}) };
@@ -1203,23 +1208,26 @@ function renderPreparation() {
   text(ui['selection-count'], c && !['cancelled', 'invalid'].includes(status) ? `已准备 ${c.count} / ${c.target} 人` : `目标 ${target || '—'} 人`);
   const progress = c && !['cancelled', 'invalid'].includes(status) ? Math.min(100, Math.round(c.count / c.target * 100)) : 0;
   ui['collection-progress'].style.width = `${progress}%`;
-  text(ui['collection-reason'], sourceDirty ? '来源或筛选条件已变化，旧名单已失效，请重新准备。' : status === 'collecting' ? `仍缺 ${c.shortfall} 人。准备期间请保持专用 Shopee 页可见，工具会继续加载并筛选。` : status === 'ready' ? `已锁定 ${c.target} 人。修改人数请先取消准备。` : status === 'consumed' ? '这份名单已用于当前任务；下一次发送需重新准备。' : c?.reason || '填写人数后准备名单，备齐才可启动。');
+  text(ui['collection-reason'], sourceDirty ? '来源或筛选条件已变化，旧名单已失效，请重新准备。' : status === 'collecting' ? `仍缺 ${c.shortfall} 人。准备在后台继续，可留在工作台等待；长时间没有进展时切到专用 Shopee 页可加快加载。` : status === 'ready' ? `已锁定 ${c.target} 人。修改人数请先取消准备。` : status === 'consumed' ? '这份名单已用于当前任务；下一次发送需重新准备。' : c?.reason || '填写人数后准备名单，备齐才可启动。');
   const choosing = c?.selectionVersion === 1 && !['cancelled', 'invalid'].includes(status);
-  ui['selection-tools'].hidden = !choosing || taskOpen();
+  const resumable = c?.selectionVersion === 1 && status === 'insufficient' && (c.candidates?.length || 0) > 0;
+  ui['selection-tools'].hidden = !(choosing || resumable) || taskOpen();
   ui['refill-selection'].disabled = selectionSaving || !selectionEditable() || !c?.shortfall;
   ui['reset-selection'].disabled = selectionSaving || !selectionEditable();
-  ui['extend-candidates'].disabled = selectionSaving || !selectionEditable() || c?.candidateCount >= 200;
+  ui['extend-candidates'].disabled = selectionSaving || !(selectionEditable() || selectionResumable()) || c?.candidateCount >= 200;
+  text(ui['extend-candidates'], resumable && !selectionEditable() ? '继续准备候选人' : '继续加载候选');
   text(ui['refill-selection'], `补足到 ${c?.target || target || '目标'} 人`);
   text(ui['reset-selection'], `恢复默认前 ${c?.target || target || '目标'} 人`);
   text(ui['roster-help'], choosing ? '默认勾选前目标人数，可取消后选择备选。每页显示 10 人，选择跨页保留。' : '按人数自动备齐并锁定，每页显示 10 人。');
   if (choosing) {
     text(ui['selection-count'], `候选 ${c.candidateCount} / ${c.candidateTarget} · 已选 ${c.count} / ${c.target} 人`);
     ui['collection-progress'].style.width = `${Math.min(100, Math.round(c.candidateCount / c.candidateTarget * 100))}%`;
-    if (status === 'collecting') text(ui['collection-reason'], `正在准备 ${c.candidateTarget} 名候选，已选 ${c.count} / ${c.target} 人。请保持专用 Shopee 页可见，完成后可调整选择。`);
+    if (status === 'collecting') text(ui['collection-reason'], `正在准备 ${c.candidateTarget} 名候选，已选 ${c.count} / ${c.target} 人。准备在后台继续；长时间没有进展时切到专用 Shopee 页可加快加载。`);
     if (status === 'ready') text(ui['collection-reason'], `${c.candidateShortfall ? '候选缓冲不足。' : ''}已选 ${c.count} / ${c.target} 人${c.shortfall ? `，还差 ${c.shortfall} 人；可补足或手动勾回已取消人员。` : '；发送前请核对最终名单。'}${c.candidateCount >= 200 ? '候选已达 200 人上限。' : ''}`);
   }
   if (preparation?.reason && ['filtering', 'invalid'].includes(preparation.status)) text(ui['collection-reason'], preparation.reason);
   if (selectionSaving) text(ui['collection-reason'], `选择正在保存（剩余 ${pendingSelections.length} 项），可继续勾选；保存完成前不能启动任务。`);
+  if (status === 'insufficient' && resumable) text(ui['collection-reason'], `${c.reason || '名单尚未备齐'}；已收集的 ${c.candidateCount} 名候选与当前选择都会保留，可点“继续准备候选人”接着加载。`);
   if (status === 'insufficient' && c.source?.type === 'specified') text(ui['collection-reason'], `${ui['collection-reason'].textContent} 当前页面未找到 ${c.missing ?? 0} 个指定 ID；观察名单中被排除 ${c.excluded ?? 0} 人（筛选条件或已有记录）。`);
   if (available && !targetCountAvailable) text(ui['collection-reason'], latestApplied ? reloadHelp : '正在连接扩展后台…');
   const webpage = ['marketplace', 'leaderboard'].includes(ui['source-type'].value);

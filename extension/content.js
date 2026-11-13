@@ -119,7 +119,21 @@
           prepared.editor = editorNode(); prepared.send = sendNode();
           if (!prepared.editor || !prepared.send) throw new Error('聊天控件无法识别');
         }
-      } else if (command.mode === 'send') setText(prepared.editor, command.text);
+      } else if (command.mode === 'send') {
+        setText(prepared.editor, command.text);
+        // React may not have flushed the value into its own state yet. Wait
+        // read-only until the page reports both this exact text and an enabled
+        // send control, then ask for the single-use permit. Nothing is clicked,
+        // cleared or retyped inside this loop.
+        let ready = false;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          chat = checkChat(await read(command.text), command, prepared.shopId);
+          if (chat.editorText === command.text && chat.sendReady) { ready = true; break; }
+          if (chat.mediaCount || chat.replyCount) break;
+          await wait(150);
+        }
+        if (!ready) throw new Error(chat.editorText === command.text ? '发送控件尚不可用，已阻止发送' : '消息文本与预览不符，已阻止发送');
+      }
       stage = 'authorize';
       const permit = (await call('page:authorize', context(command))).command;
       if (!permit || permit.type !== 'permit' || permit.sessionId !== command.sessionId || permit.itemId !== command.itemId || permit.mode !== command.mode || permit.messageIndex !== command.messageIndex) return;

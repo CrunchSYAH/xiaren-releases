@@ -2,7 +2,7 @@ import { initialState, previewTask, reduceQueue, currentText, currentMessage } f
 import { validatePage, validateChat, validateImageChat } from './page-guards.mjs';
 import { inspectPage } from '../page-snapshot.mjs';
 import { inspectFilters } from '../page-filters-page.mjs';
-import { createCollection, updateCollection, invalidateCollection, rosterSignature, selectCandidate, refillSelection, resetSelection, extendCandidates } from './collection.mjs';
+import { createCollection, updateCollection, invalidateCollection, rosterSignature, selectCandidate, refillSelection, resetSelection, extendCandidates, continueCollection } from './collection.mjs';
 import { normalizeSource } from './audience.mjs';
 import { LEADERBOARD_PATH, claimLeaderboardPage, leaderboardRoster } from './leaderboard.mjs';
 import { AFFILIATE_PATH, affiliateRoster } from './affiliate-source.mjs';
@@ -11,12 +11,35 @@ import { affiliateResolverPage } from '../affiliate-resolver-page.mjs';
 import { createCreatorLibraryHandler, isCreatorLibraryMessage } from './creator-library-handler.mjs';
 import { readTaskHistory, archiveTask, listTaskHistory, getTaskHistoryDetail, exportTaskHistory } from './task-history.mjs';
 import { readMessageTemplates, listMessageTemplates, createMessageTemplate, updateMessageTemplate, copyMessageTemplate } from './message-templates.mjs';
-import { readImageAssets, listImageAssets, addImageAsset, getImageAsset, imageReference, normalizeImageReference } from './image-assets.mjs';
+import { readImageAssets, listVerifiedAssets, getVerifiedAsset, appendVerifiedAsset, getImageAsset, imageReference, normalizeImageReference } from './image-assets.mjs';
 
+const SELLER_ORIGIN = 'https://seller.shopee.co.id';
 const MARKETPLACE = 'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace';
 const MARKETPLACE_PATH = new URL(MARKETPLACE).pathname;
 const ACTIVE = new Set(['running', 'pausing', 'stopping']);
 const LOG_LIMIT = 3000, LOG_BYTES = 1024 * 1024;
+// Page silence always means the dedicated tab is gone. A page action may take
+// longer than one round-trip while it turns a leaderboard page or waits for a
+// detail document, so only the sending phase keeps the short budget.
+const PAGE_TIMEOUT = 45_000, PREPARE_TIMEOUT = 90_000;
+// Chrome throttles timers in a hidden tab to roughly one beat per minute, so a
+// hidden page is allowed two missed beats before its silence counts as an
+// outage. A visible page keeps the short budget.
+const HIDDEN_TIMEOUT = 150_000;
+// The page executor polls once per second while it is visible. When the roster
+// page stays silent for longer than this, the background drives the collection
+// itself instead of waiting for a throttled timer.
+const COLLECT_DRIVE_MS = 4_000, COLLECT_DRIVE_GAP_MS = 2_500;
+// A claimed scroll the throttled page never answered goes stale, so the worker
+// may take that step over instead of waiting a whole throttled beat.
+const COLLECT_ACTION_STALE_MS = 15_000;
+// No "tabs" permission is requested, so a dedicated tab that left the seller
+// origin reports tab.url as undefined. Parse once here and never hand an
+// undefined or malformed URL to new URL().
+function tabUrl(tab) {
+  if (typeof tab?.url !== 'string' || !tab.url) return null;
+  try { return new URL(tab.url); } catch { return null; }
+}
 const HISTORY_READS = new Set(['panel:history-list', 'panel:history-detail', 'panel:history-export']);
 const TEMPLATE_EVENTS = new Set(['panel:template-list', 'panel:template-create', 'panel:template-update', 'panel:template-copy']);
 const IMAGE_EVENTS = new Set(['panel:image-list', 'panel:image-add', 'panel:image-get']);
@@ -25,6 +48,23 @@ const PANEL_EVENTS = new Set([...SELECTION_EVENTS, 'panel:open', 'panel:collect'
 const LOG_EVENTS = new Set([...PANEL_EVENTS, 'backend:ready', 'task:state', 'item:state', 'workspace:state', 'page:hello', 'page:error', 'page:prepared', 'page:result', 'page:timeout', 'tab:updated', 'tab:removed', 'operation:error', 'storage:error', 'diagnostics:storage-error']);
 const STATUSES = new Set(['running', 'pausing', 'paused', 'stopping', 'stopped', 'completed', 'pending', 'preparing', 'prepared', 'sending', 'sent', 'rehearsed', 'skipped', 'failed', 'uncertain', 'collecting', 'ready', 'consumed', 'cancelled', 'invalid', 'insufficient']);
 const STAGES = new Set(['hello', 'poll', 'collect', 'prepare', 'snapshot', 'open-chat', 'wait-chat', 'fill', 'authorize', 'commit', 'result']);
+const PREPARATION_REASONS = new Set([
+  '名单来源无效', '名单来源无效，仅支持达人广场、排行榜、指定联盟伙伴或指定已加载名单',
+  '指定名单须使用数字字符串形式的 Shopee 用户 ID', '指定名单须包含1—200个不同的 Shopee 用户 ID',
+  '姓名筛选条件须为不超过100个字符的文字', '当前名单来源不支持从当前位置准备', '名单起始位置无效',
+  '当前名单来源不支持网页筛选', '网页筛选条件无效', '网页筛选条件须为不超过100个字符且不含控制字符的文字',
+  '目标人数必须是 1–200 的整数', '目标人数必须等于指定名单的唯一 ID 数量',
+  '目标人数必须等于指定联盟伙伴的唯一 ID 数量', '请先结束当前任务，再准备目标名单',
+  '网页筛选正在准备，请等待核对完成或取消准备', '请打开专用达人页面，等待页面连接并登录后准备名单',
+  '工作台名称搜索已移除，请重新准备名单', '名单来源与专用页面不符，请打开对应来源页面',
+  '请先在排行榜回到第一页，或选择从当前位置准备',
+  '请先打开指定联盟伙伴的第一位官方详情，再准备名单',
+  '网页筛选结构无法核实，请重新连接专用页面', '当前页面不支持所选筛选条件，请重新读取网页筛选',
+  '所选筛选条件已不可用，请重新读取网页筛选', '网页筛选准备超时，请重新准备',
+  '店铺、文档或页面会话已变化，请重新准备名单',
+  '页面筛选条件尚未稳定，请重新准备名单', '筛选已应用，页面位置已重置；请在专用页定位后再次准备',
+  '当前来源页面尚未就绪，请重新准备名单', '页面筛选正在准备，请等待核对完成或取消准备',
+]);
 // Only fixed application/Chrome errors may enter diagnostics. Never persist
 // arbitrary exception messages, stacks, URLs, message bodies or page payloads.
 const SAFE_REASONS = new Set([
@@ -67,6 +107,7 @@ const SAFE_REASONS = new Set([
 ]);
 function logReason(value) {
   if (typeof value !== 'string' || !value) return null;
+  if (PREPARATION_REASONS.has(value)) return value;
   if (SAFE_REASONS.has(value)) return value;
   if (/^(?:加载名单达到检查上限|当前页面加载结构无法可靠识别|页面已无更多达人|页面加载停滞，未取得更多达人|名单准备超时)：目标 \d{1,3} 人，可用 \d{1,3} 人，仍缺 \d{1,3} 人；不能启动$/.test(value)) return value;
   if (/^目标名单中的达人已不可发送（(?:拒绝名单|已有发送或不确定记录)），已暂停；不会补人或重试$/.test(value)) return value;
@@ -104,8 +145,17 @@ function cleanLogEvent(value) {
 
 export function createBackend(api, { now = () => Date.now(), uid = () => crypto.randomUUID(), readSnapshot, readPageFilters } = {}) {
   const library = createCreatorLibraryHandler(api, { now, uid });
-  let state, workspace, browserSessionId, loaded = false, faulted = false, preview = null;
+  let state, workspace, browserSessionId, loaded = false, faulted = false;
   let reconnectAt = 0, reconnectFailed = false;
+  // Each dashboard tab keeps its own preview token, so two open workbenches no
+  // longer invalidate each other's preview. Any page/roster change clears all.
+  const previews = new Map();
+  const previewKey = sender => String(sender?.tab?.id ?? 'panel');
+  const clearPreviews = () => previews.clear();
+  function rememberPreview(key, value) {
+    previews.delete(key); previews.set(key, value);
+    while (previews.size > 4) previews.delete(previews.keys().next().value);
+  }
   let serial = Promise.resolve();
   let diagnostics = { version: 1, dropped: 0, events: [] }, logSize = 0, logDirty = false, logWriteFailed = false, retryLogAt = 0;
   let logWriting = false, logRevision = 0;
@@ -235,19 +285,22 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
     let saved;
     try { saved = await api.storage.local.get(['creatorImageAssets']); }
     catch { throw new Error('本地图片读取失败，请检查存储后重试；原图片已保留'); }
+    // One verified read per request: the digest of every asset is still checked,
+    // but listing and lookup below project from it instead of re-hashing the
+    // whole library four times for a single add.
     const store = await readImageAssets(saved.creatorImageAssets);
-    if (message.type === 'panel:image-list') return { imageAssets: await listImageAssets(store) };
+    if (message.type === 'panel:image-list') return { imageAssets: listVerifiedAssets(store) };
     if (message.type === 'panel:image-get') {
-      const imageAsset = await getImageAsset(store, message.assetId);
+      const imageAsset = getVerifiedAsset(store, message.assetId);
       if (!imageAsset) throw new Error('图片资产不存在，请重新选择图片');
       return { imageAsset };
     }
-    const result = await addImageAsset(store, message.draft, { id: uid(), now: now() });
+    const result = await appendVerifiedAsset(store, message.draft, { id: uid(), now: now() });
     if (!result.reused) {
       try { await api.storage.local.set({ creatorImageAssets: result.store }); }
       catch { throw new Error('本地图片保存失败或容量不足，请精简图片后重试；原图片已保留'); }
     }
-    return { imageAssets: await listImageAssets(result.store), imageAsset: await getImageAsset(result.store, result.assetId), assetId: result.assetId, reused: result.reused };
+    return { imageAssets: listVerifiedAssets(result.store), imageAsset: getVerifiedAsset(result.store, result.assetId), assetId: result.assetId, reused: result.reused };
   }
   async function loadImage(reference) {
     const expected = normalizeImageReference(reference);
@@ -427,15 +480,48 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
     }
     return true;
   }
-  function invalidateRoster(reason, includeConsumed = false) {
-    if (workspace?.preparation?.status === 'filtering') workspace = { ...workspace, preparation: { ...workspace.preparation, status: 'invalid', reason } };
+  // One roster step, whichever side drives it: the page executor while the tab
+  // is visible, or this worker when Chrome has throttled a hidden tab's timers.
+  // The claimed action token still keeps every scroll single-use.
+  async function collectStep(token = null) {
+    const c = workspace.collection;
+    if (c?.status !== 'collecting' || c.pagePending || workspace.navigation) return false;
+    if (token && (!c.action || c.action.token !== token)) return false;
+    const current = await read();
+    const checked = workspace.collection;
+    if (checked?.status !== 'collecting' || (token && checked.action?.signature !== rosterSignature(current.creators))) return false;
+    if (current.list?.loading) return false;
+    if (checked.source?.type === 'leaderboard') return turnLeaderboard(checked.pagination.currentPage + 1, current);
+    if (checked.source?.type === 'affiliates') return navigateAffiliate(checked.source.affiliateIds[checked.affiliateState.observations.length], current);
+    const signature = rosterSignature(current.creators);
+    workspace.collection = { ...checked, action: null };
+    await save(); // Claim before scrolling; no long promise occupies serial.
+    const result = await snapshot(workspace.tabId, '', workspace.documentId, null, { type: 'load-more', shopId: current.shop.id, documentEpoch: workspace.documentEpoch, signature });
+    return result.listAction?.performed === true;
+  }
+  let collectBusy = false, collectNextAt = 0;
+  async function advanceCollection() {
+    const c = workspace?.collection;
+    if (collectBusy || !c || c.status !== 'collecting' || c.pagePending || workspace.navigation || !workspace.tabId
+      || !workspace.pageId || !workspace.documentId || now() < collectNextAt) return;
+    // Only take over once the page stopped polling on its own schedule, and
+    // never race a scroll claim the page executor still owns.
+    if (now() - (workspace.lastSeen || 0) < COLLECT_DRIVE_MS) return;
+    if (c.action && now() - (c.action.at ?? 0) < COLLECT_ACTION_STALE_MS) return;
+    collectBusy = true;
+    collectNextAt = now() + COLLECT_DRIVE_GAP_MS;
+    try { await collectStep(); }
+    catch { /* Real page failures are reported by the page executor itself. */ }
+    finally { collectBusy = false; }
+  }
+  function invalidateRoster(reason, includeConsumed = false) {    if (workspace?.preparation?.status === 'filtering') workspace = { ...workspace, preparation: { ...workspace.preparation, status: 'invalid', reason } };
     if (workspace?.collection && (includeConsumed || ['collecting', 'ready'].includes(workspace.collection.status))) {
       workspace = { ...workspace, collection: invalidateCollection(workspace.collection, reason) };
-      preview = null;
+      clearPreviews();
     }
   }
   async function interrupt(reason) {
-    preview = null;
+    clearPreviews();
     invalidateRoster(reason);
     if (state.task && state.task.status !== 'completed') await apply({ type: 'interrupt', reason });
   }
@@ -464,7 +550,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
     if (state.task && ACTIVE.has(state.task.status) && page.shop.id !== state.task.config.shop.id) {
       await interrupt('店铺账号已变化，请重新核对；旧任务不会在新店铺继续');
     }
-    if (workspace.shop?.id !== page.shop.id) preview = null;
+    if (workspace.shop?.id !== page.shop.id) clearPreviews();
     workspace = { ...workspace, documentEpoch: page.documentEpoch, path: page.path, shop: page.shop, creators: (page.creators || []).slice(0, 200), error: null };
     const c = workspace.collection;
     if (c && ['collecting', 'ready', 'consumed'].includes(c.status)) {
@@ -473,10 +559,10 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       workspace.collection = c.status === 'consumed' && checked.status === 'ready' ? { ...checked, status: 'consumed' } : checked;
       page.sourceValid = ['collecting', 'ready', 'consumed'].includes(workspace.collection.status) && !workspace.collection.pagePending;
       if (workspace.collection.status === 'invalid') {
-        preview = null;
+        clearPreviews();
         if (state.task?.config.collectionId === c.id && ACTIVE.has(state.task.status)) await interrupt(workspace.collection.reason);
       }
-      if (c.selectionRevision !== checked.selectionRevision) preview = null;
+      if (c.selectionRevision !== checked.selectionRevision) clearPreviews();
       if (c.selectionRevision !== checked.selectionRevision || c.status !== workspace.collection.status || c.observed.length !== workspace.collection.observed.length || JSON.stringify(c.pagination) !== JSON.stringify(checked.pagination) || JSON.stringify(c.affiliateState) !== JSON.stringify(checked.affiliateState) || c.pagePending !== checked.pagePending) await save();
     }
     return page;
@@ -525,17 +611,21 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
   async function inject() {
     if (!workspace) return;
     const tab = await api.tabs.get(workspace.tabId);
-    if (new URL(tab.url).origin !== 'https://seller.shopee.co.id') throw new Error('专用页面已离开印尼卖家站');
+    const location = tabUrl(tab);
+    if (!location || location.origin !== SELLER_ORIGIN) throw new Error('专用页面已离开印尼卖家站');
     if (!workspace.pageId) {
       // A filter/navigation can clear our binding while reusing the document.
       // Retire its old controller before injection so its guard cannot skip hello.
       reconnectAt = now() + 5000;
       await api.scripting.executeScript({ target: { tabId: workspace.tabId }, func: () => { if (globalThis.__creatorOutreachPage) globalThis.__creatorOutreachPage.stopped = true; }, args: [] });
     }
-    if (new URL(tab.url).pathname === AFFILIATE_PATH) await api.scripting.executeScript({ target: { tabId: workspace.tabId }, world: 'MAIN', func: affiliateResolverPage, args: [null, 'install'] });
-    if ([MARKETPLACE_PATH, LEADERBOARD_PATH].includes(new URL(tab.url).pathname)) await api.scripting.executeScript({ target: { tabId: workspace.tabId }, world: 'MAIN', func: inspectFilters, args: [{}] });
+    if (location.pathname === AFFILIATE_PATH) await api.scripting.executeScript({ target: { tabId: workspace.tabId }, world: 'MAIN', func: affiliateResolverPage, args: [null, 'install'] });
+    if ([MARKETPLACE_PATH, LEADERBOARD_PATH].includes(location.pathname)) await api.scripting.executeScript({ target: { tabId: workspace.tabId }, world: 'MAIN', func: inspectFilters, args: [{}] });
     await api.scripting.executeScript({ target: { tabId: workspace.tabId }, files: ['content.js'] });
   }
+  // A hidden tab reports roughly once a minute, so the same silence that means
+  // "page gone" on a visible tab is normal there.
+  const pageSilenceLimit = () => pageEnvironment.visibility === 'hidden' ? HIDDEN_TIMEOUT : PAGE_TIMEOUT;
   async function expire() {
     if (workspace?.preparation?.status === 'filtering' && now() - workspace.preparation.startedAt >= 45000) {
       invalidateRoster('网页筛选准备超时，请重新准备'); await save();
@@ -545,18 +635,24 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       invalidateRoster(reason, true); await interrupt(reason);
       await save(state, { ...workspace, navigation: null, bindingAffiliateNavigation: false });
     }
-    if (workspace?.collection?.status === 'collecting' && now() - workspace.lastSeen > 45_000) {
+    if (workspace?.collection?.status === 'collecting' && now() - workspace.lastSeen > pageSilenceLimit()) {
       invalidateRoster('专用页面响应超时，名单准备已失效，请重新准备'); await save();
     }
     if (!state.task || !ACTIVE.has(state.task.status)) return;
     const age = now() - (workspace?.lastSeen || 0);
     const actionAge = now() - state.task.updatedAt;
-    if (age > 45_000 || (state.task.items.some(item => ['preparing', 'sending'].includes(item.status)) && actionAge > 45_000)) {
-      record('page:timeout');
+    // The executor may legitimately retry open-chat for 40s (page turn or
+    // detail navigation) and then wait 10s for the chat panel, so a preparing
+    // item gets the longer budget; a sending item must answer immediately.
+    const pending = state.task.items.filter(item => ['preparing', 'sending'].includes(item.status));
+    const actionLimit = pending.some(item => item.status === 'sending') ? PAGE_TIMEOUT : PREPARE_TIMEOUT;
+    const silenceLimit = pageEnvironment.visibility === 'hidden' ? Math.max(HIDDEN_TIMEOUT, actionLimit) : PAGE_TIMEOUT;
+    if (age > silenceLimit || (pending.length && actionAge > actionLimit)) {
+      record('page:timeout', { context: { sinceLastSeenMs: Math.max(0, age), actionAgeMs: Math.max(0, actionAge) } });
       await interrupt('页面响应超时，已暂停；请核对当前结果后恢复');
     }
   }
-  async function panel(message) {
+  async function panel(message, sender) {
     if (workspace?.preparation?.status === 'filtering' && ['panel:preview', 'panel:start', 'panel:resume'].includes(message.type)) throw new Error('网页筛选正在准备，请等待核对完成或取消准备');
     if (workspace?.navigation && ['panel:preview', 'panel:start', 'panel:resume'].includes(message.type)) throw new Error('联盟伙伴详情加载中，请等待店铺与身份核对');
     if (message.type === 'panel:get') {
@@ -572,6 +668,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
           await save();
         }
       }
+      await advanceCollection();
       return payload();
     }
     if (message.type === 'panel:open') {
@@ -581,7 +678,14 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
         let tab;
         try { tab = await api.tabs.get(workspace.tabId); } catch { await interrupt('原专用页面已关闭或无法连接'); }
         if (tab) {
-          if (message.source && (new URL(tab.url).pathname !== requestedPath || requestedSource.type === 'affiliates' && tab.url !== requestedUrl)) {
+          // tab.url is invisible once the dedicated tab leaves the seller
+          // origin (no "tabs" permission). Unknown or foreign location means we
+          // cannot prove it is still on the requested source page, so fall back
+          // to navigating it back instead of throwing on new URL(undefined).
+          const location = tabUrl(tab);
+          const onSourcePage = !!location && location.origin === SELLER_ORIGIN && location.pathname === requestedPath
+            && (requestedSource.type !== 'affiliates' || tab.url === requestedUrl);
+          if (message.source && !onSourcePage) {
             if (state.task && state.task.status !== 'completed') throw new Error('请先结束当前任务，再切换专用来源页面');
             await api.scripting.executeScript({ target: { tabId: workspace.tabId }, func: () => { if (globalThis.__creatorOutreachPage) globalThis.__creatorOutreachPage.stopped = true; } });
             invalidateRoster('专用页面地址已变化，原目标名单已失效', true);
@@ -593,7 +697,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
         }
       }
       const tab = await api.tabs.create({ url: requestedUrl, active: false });
-      preview = null;
+      clearPreviews();
       await save(state, { browserSessionId, tabId: tab.id, pageId: null, shop: null, creators: [], lastSeen: now(), error: '页面加载中，请在登录后准备名单' });
       // onUpdated injects after a newly created tab finishes loading.
       return payload();
@@ -610,17 +714,20 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       if (state.task && state.task.status !== 'completed') throw new Error('名单已进入任务，不能修改选择');
       if (workspace?.preparation?.status === 'filtering' || !workspace?.pageId) throw new Error('来源页面尚未就绪，请重新准备名单');
       const current = await read(), c = workspace.collection;
-      if (!c || c.id !== message.collectionId || c.selectionVersion !== 1 || c.status !== 'ready' || c.pagePending) throw new Error('候选名单已变化或尚未备齐，请重新准备');
+      const resuming = message.type === 'panel:extend-candidates' && c?.status === 'insufficient';
+      if (!c || c.id !== message.collectionId || c.selectionVersion !== 1 || c.pagePending || !(c.status === 'ready' || resuming)) throw new Error('候选名单已变化或尚未备齐，请重新准备');
       if (!Number.isInteger(message.expectedRevision) || message.expectedRevision !== c.selectionRevision) throw new Error('名单选择版本已变化，请刷新后重新操作');
       let next;
       if (message.type === 'panel:select') next = selectCandidate(c, message.creatorId, message.selected);
       if (message.type === 'panel:refill-selection') next = refillSelection(c);
       if (message.type === 'panel:reset-selection') next = resetSelection(c);
       if (message.type === 'panel:extend-candidates') {
-        next = updateCollection(extendCandidates(c, now()), current, state, rosterBinding(current.shop.id), now());
-        if (next.candidateCount === c.candidateCount && current.list?.hasMore !== true) throw new Error('当前来源已无更多候选，请手动勾回已取消人员');
+        // A short or stalled roster keeps its pool: continuing resumes the same
+        // frozen collection instead of restarting from the first row.
+        next = updateCollection(resuming ? continueCollection(c, now()) : extendCandidates(c, now()), current, state, rosterBinding(current.shop.id), now());
+        if (!resuming && next.candidateCount === c.candidateCount && current.list?.hasMore !== true) throw new Error('当前来源已无更多候选，请手动勾回已取消人员');
       }
-      preview = null;
+      clearPreviews();
       await save(state, { ...workspace, collection: next });
       return payload();
     }
@@ -632,7 +739,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       if (Object.hasOwn(source.webFilters || {}, 'search')) throw new Error('工作台名称搜索已移除，请重新准备名单');
       const page = await read();
       if (page.path !== sourcePath(source)) throw new Error('名单来源与专用页面不符，请打开对应来源页面');
-      preview = null;
+      clearPreviews();
       if (source.webFilters) {
         createCollection(message.targetCount, rosterBinding(page.shop.id), 'validation', now(), source);
         const observedFilters = await pageFilters(workspace.tabId, filterBinding());
@@ -650,7 +757,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       if (state.task && state.task.status !== 'completed') throw new Error('名单已进入任务，请通过任务暂停或结束操作');
       if (workspace?.preparation?.status === 'filtering') workspace.preparation = { ...workspace.preparation, status: 'cancelled', reason: '用户取消准备，名单已失效' };
       if (workspace?.collection) workspace.collection = { ...workspace.collection, status: 'cancelled', action: null, reason: '用户取消准备，名单已失效' };
-      preview = null; await save(); return payload();
+      clearPreviews(); await save(); return payload();
     }
     if (message.type === 'panel:preview' || message.type === 'panel:start') {
       if (!workspace?.pageId) throw new Error('专用页面尚未连接，请重新打开专用页面');
@@ -660,27 +767,29 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
         if (state.task && state.task.status !== 'completed') throw new Error('请先结束当前任务，再建立新任务');
         const result = previewTask(state, message.config);
         await checkImages(message.config.messages);
-        preview = { token: uid(), signature: signature(message.config), pageId: workspace.pageId, shopId: page.shop.id };
+        const key = previewKey(sender), token = uid();
+        rememberPreview(key, { token, signature: signature(message.config), pageId: workspace.pageId, shopId: page.shop.id });
         await save();
-        return { ...payload(), preview: result, previewToken: preview.token };
+        return { ...payload(), preview: result, previewToken: token };
       }
+      const preview = previews.get(previewKey(sender));
       if (!preview || preview.token !== message.previewToken || preview.signature !== signature(message.config) || preview.pageId !== workspace.pageId || preview.shopId !== page.shop.id) throw new Error('配置或页面已变化，请重新预览后启动');
       if (message.config.mode === 'send' && message.confirmed !== true) throw new Error('请先确认本次真实发送的店铺、名单与逐人消息');
       await checkImages(message.config.messages);
       const started = reduceQueue(state, { type: 'start', config: message.config, binding: { tabId: workspace.tabId, pageId: workspace.pageId } }, { now: now(), uid }).state;
       await archiveCompletedTask();
       await save(started, message.config.collectionId ? { ...workspace, collection: { ...workspace.collection, status: 'consumed', action: null } } : workspace);
-      preview = null;
+      clearPreviews();
       return payload();
     }
     if (message.type === 'panel:pause' || message.type === 'panel:stop') {
       if (workspace?.preparation?.status === 'filtering') {
         workspace.preparation = { ...workspace.preparation, status: 'cancelled', reason: '用户暂停或停止准备，名单已失效' };
-        preview = null; await save(); return payload();
+        clearPreviews(); await save(); return payload();
       }
       if (workspace?.collection?.status === 'collecting') {
         workspace.collection = { ...workspace.collection, status: 'cancelled', action: null, reason: '用户暂停或停止准备，名单已失效' };
-        preview = null; await save(); return payload();
+        clearPreviews(); await save(); return payload();
       }
       await apply({ type: message.type.slice(6) }); return payload();
     }
@@ -700,7 +809,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       const finished = structuredClone(state);
       for (const item of finished.task.items) if (['pending', 'failed'].includes(item.status)) { item.status = 'skipped'; item.reason ||= '用户结束本任务'; }
       finished.task.status = 'completed'; finished.task.reason = '用户结束本任务，未处理项已跳过'; finished.task.updatedAt = now();
-      await save(finished); preview = null; return payload();
+      await save(finished); clearPreviews(); return payload();
     }
     if (message.type === 'panel:deny') {
       if (!workspace?.shop || message.shopId !== workspace.shop.id) throw new Error('拒绝名单店铺不符，请核对当前店铺并重新准备名单');
@@ -709,7 +818,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
         if (workspace.collection.selectionVersion === 1) await read();
         else if (workspace.collection.creators.some(row => row.id === message.creatorId)) { invalidateRoster('锁定名单的拒绝记录已变化，请重新准备'); await save(); }
       }
-      preview = null; return payload();
+      clearPreviews(); return payload();
     }
     throw new Error('不支持此工作台操作');
   }
@@ -770,16 +879,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
     if (message.type === 'page:collect-step') {
       const c = workspace.collection;
       if (c?.status !== 'collecting' || c.id !== message.collectionId || !c.action || c.action.token !== message.token) return { performed: false };
-      const current = await read();
-      const checked = workspace.collection;
-      if (checked.status !== 'collecting' || checked.action?.signature !== rosterSignature(current.creators)) return { performed: false };
-      if (checked.source?.type === 'leaderboard') return { performed: await turnLeaderboard(checked.pagination.currentPage + 1, current) };
-      if (checked.source?.type === 'affiliates') return { performed: await navigateAffiliate(checked.source.affiliateIds[checked.affiliateState.observations.length], current) };
-      const signature = checked.action.signature;
-      workspace.collection = { ...checked, action: null };
-      await save(); // Claim before scrolling; no long promise occupies serial.
-      const result = await snapshot(workspace.tabId, '', workspace.documentId, null, { type: 'load-more', shopId: current.shop.id, documentEpoch: workspace.documentEpoch, signature });
-      return { performed: result.listAction?.performed === true };
+      return { performed: await collectStep(message.token) };
     }
     if (message.type === 'page:error') {
       record('page:error', { stage: message.stage, error: message.error, context: diagnosticContext(message.itemId) });
@@ -798,7 +898,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       if (c?.status === 'collecting') {
         if (current.list?.loading || c.pagePending) { await save(); return { command: null }; }
         const token = uid();
-        workspace.collection = { ...c, action: { token, signature: rosterSignature(current.creators) } };
+        workspace.collection = { ...c, action: { token, signature: rosterSignature(current.creators), at: now() } };
         await save();
         return { command: { type: 'collect', collectionId: c.id, token } };
       }
@@ -929,7 +1029,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       await initialize();
       if (message?.type === 'panel:export-diagnostics') return exportDiagnostics();
       if (faulted) throw new Error('本地存储保存失败，已阻止操作；请关闭专用页面后重新加载扩展');
-      if (message?.type?.startsWith('panel:')) { if (PANEL_EVENTS.has(message.type)) record(message.type); return panel(message); }
+      if (message?.type?.startsWith('panel:')) { if (PANEL_EVENTS.has(message.type)) record(message.type); return panel(message, sender); }
       if (message?.type?.startsWith('page:')) {
         // A new hello may bind the newly navigated document; every other message
         // must originate in the document that was bound at hello/prepare time.

@@ -42,4 +42,5 @@
 - 本地达人库由 `creator-library*` 独占模块／页面提供，独立 `creatorLibrary` 键，最多2000条／JSON UTF-8 2MiB，全库revision冲突保护，不自动淘汰。后台库handler在业务enqueue和initialize之前分流，仅精确工作台／库顶层页可用，失败不影响队列、日志、图片或模板。工作台与达人库在当前标签页往返，跳转前按标签页暂存消息／图片引用及表单草稿，返回后读取并移除暂存，未结束任务仍以后台配置为准；交接仅传版本、店铺范围与记录ID，过大或无效交接明确报错。仅显式套用时按revision/当前店铺重新读取选择并撤销旧名单确认，仍走当前页面准备。手填／导入不赋予已核实状态，无用户映射的伙伴ID记录不直接发送；不自动写入页面核实映射。
 - 本轮并行文件所有权与证据报告见 `docs/archive/research/parallel-sources-2026-10-20.md`、`docs/archive/handoff/handoff-leaderboard-integration.md`；真实发送、平台接受/送达/已读及真实发图仍未验收。本地夹具成功不能当作实站成功。
 - 防重发记录（`creatorQueue.history`）设 30 天窗口：`core/history-window.mjs` 的 `HISTORY_WINDOW_MS` 从记录最后一次写入（登记发送意图或确认提交）起算，满 30 天后判重放行；`queue.mjs` 的预览／调度、`collection.mjs` 与 `affiliate-source.mjs` 的资格筛选、`dashboard.mjs` 的候选人状态统一用 `activeHistory` 判断，窗口不一致会让预览可发而启动被跳过。无 `updatedAt` 或时间不可信的旧记录永不释放；`denied` 拒绝名单不随时间失效。启动新任务、后台初始化会就地 `pruneHistory`，惰性判断保证即使清理写盘失败也按窗口放行。
+- 当前扩展与 `package.json` 版本号须保持一致；推送 main 会触发 CI 校验与发布。Release tag 已使用后不可复用，下一版本必须在两处同步递增并添加 `.github/release-notes/vX.Y.Z.md`。
 

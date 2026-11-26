@@ -15,6 +15,15 @@ const FORBIDDEN_MANIFEST_FIELDS = ['optional_permissions', 'optional_host_permis
 
 export class UpdaterError extends Error {}
 
+// File System Access 的目录句柄只接受单个路径段：getFileHandle('core/x.mjs')
+// 在 Chrome 里会抛 TypeError（Name is not allowed）。安装包里的相对路径必须先
+// 按段拆开，再逐级 getDirectoryHandle 下钻，最后由父目录取文件名。
+export function pathSegments(name) {
+  const parts = String(name ?? '').split('/');
+  if (!parts.length || parts.some(part => !part || part === '.' || part === '..')) throw new UpdaterError('安装包路径无效');
+  return parts;
+}
+
 export const releaseAssetName = version => `xiaren-chrome-v${version}.zip`;
 export const safeName = value => typeof value === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
 

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>目标100人追加加载 · 虚构本地夹具</title>
+<style>body{font:15px/1.6 system-ui;margin:24px;color:#27364a;background:#f7f8fa}header,aside{position:sticky;top:0;background:#fff;padding:14px;border:1px solid #ccc}header{z-index:2}button,select,textarea{font:inherit;margin:4px;padding:8px}table{border-collapse:collapse;width:100%;background:white}td,th{padding:18px;border-bottom:1px solid #ddd;text-align:left}.kol-loading-more{padding:24px;text-align:center}.kol-card-item-name{font-weight:bold}#sidebar-minichat-list{position:fixed;right:12px;bottom:12px;width:360px;background:white;border:2px solid #e84b2f;padding:18px;z-index:3}textarea{width:90%}#messagesContainer{max-height:180px;overflow:auto}[hidden]{display:none!important}</style></head>
+<body><header><strong>仅本机虚构夹具：12人一批，最多132人；模拟结果不能证明真实平台可用。</strong><br>
+<label>加载异常 <select id="fault"><option value="normal">正常追加</option><option value="exhausted">48人耗尽</option><option value="stalled">加载停滞</option><option value="replace">下一批替换原行</option><option value="no-chat">每3人缺聊天入口</option></select></label>
+<label>模拟回执 <select id="result"><option value="sent">成功</option><option value="failed">明确失败</option><option value="uncertain">等待不确定</option><option value="empty">缺少水位</option></select></label>
+<button id="next">手动加载下一批</button><button id="reset">重置夹具</button><output id="count"></output> · 模拟发送点击 <output id="clicks">0</output></header>
+<main class="kol-card-layout-global"><table><thead><tr><th>虚构达人</th><th>入口</th></tr></thead><tbody></tbody></table><div class="kol-loading-more">Loading ...</div></main>
+<section id="sidebar-minichat-list" hidden><strong class="lyWL3rDmij"></strong><div id="messagesContainer"></div><textarea aria-label="仅本地模拟草稿"></textarea><div class="pqq6o4R57Y"><button class="plW8rzAMob" aria-disabled="true">仅本地模拟发送</button></div></section>
+<script>
+(() => {
+  const shop={shopId:700,shopName:'目标人数虚构店铺',isLoggedIn:true};
+  window.__$unstable_useRootStoreOutside=()=>shop;
+  const layout=document.querySelector('.kol-card-layout-global'),body=document.querySelector('tbody'),loader=document.querySelector('.kol-loading-more');
+  const fault=document.querySelector('#fault'),result=document.querySelector('#result'),chat=document.querySelector('#sidebar-minichat-list'),editor=document.querySelector('textarea'),send=document.querySelector('.plW8rzAMob'),messages=document.querySelector('#messagesContainer');
+  const flags={list:[],hasMore:true,loading:false}; layout.__reactFiber$target={memoizedProps:flags};
+  let loaded=0,clicks=0,sequence=1000,current=null,generation=0;
+  const conversations=new Map();
+  const ready=()=>send.setAttribute('aria-disabled',editor.value?'false':'true'); editor.addEventListener('input',ready);
+  function bindChat(id,name){
+    current=conversations.get(id)||{to_id:String(id),shop_id:'700',latest_message_id:String(sequence),opposite_last_deliver_msg_id:'0',messages:[]}; conversations.set(id,current);
+    if(result.value==='empty')current.latest_message_id='';
+    editor.__reactFiber$target={memoizedProps:{buyerId:String(id),shopId:'700',currentConversation:current}};
+    chat.hidden=false;chat.querySelector('strong').textContent=name;editor.value='';messages.replaceChildren();
+    for(const message of current.messages){const n=document.createElement('div');n.textContent=message.content.text;n.__reactFiber$target={memoizedProps:{message}};messages.append(n)}ready();
+  }
+  function append(index){
+    const id=index+201,name=`虚构达人 ${index+1}`,affiliateId=index+1001,row=document.createElement('tr');
+    row.className='kol-card-item';row.dataset.rowKey=`${index}_${affiliateId}`;
+    const td=document.createElement('td'),label=document.createElement('div');label.className='kol-card-item-name';label.textContent=name;td.append(label);row.append(td);
+    const action=document.createElement('td'),button=document.createElement('button');button.type='button';button.innerHTML='<svg width="16" height="16"><use href="#icon-chat-new"></use></svg> 打开本地聊天';
+    button.disabled=fault.value==='no-chat'&&index%3===0;button.addEventListener('click',()=>bindChat(id,name));action.append(button);row.append(action);
+    row.__reactFiber$target={memoizedProps:{data:{shopeeUserId:id,affiliateId,username:`synthetic_${index+1}`}}};body.append(row);
+  }
+  async function loadNext(){
+    if(flags.loading||!flags.hasMore)return; const token=generation;flags.loading=true;
+    if(fault.value==='stalled')return;
+    await new Promise(resolve=>setTimeout(resolve,120));if(token!==generation)return;
+    if(fault.value==='replace')body.replaceChildren();
+    const maximum=fault.value==='exhausted'?48:132,end=Math.min(loaded+12,maximum);
+    for(let i=loaded;i<end;i++)append(i); loaded=end;flags.list=Array(loaded).fill(null);flags.hasMore=loaded<maximum;flags.loading=false;loader.hidden=!flags.hasMore;
+    document.querySelector('#count').value=`已加载 ${loaded}，当前DOM ${body.children.length}`;
+  }
+  function reset(){generation++;loaded=0;clicks=0;current=null;sequence=1000;conversations.clear();body.replaceChildren();chat.hidden=true;editor.value='';messages.replaceChildren();document.querySelector('#clicks').value='0';flags.list=[];flags.hasMore=true;flags.loading=false;loader.hidden=false;loadNext()}
+  send.addEventListener('click',()=>{
+    if(!current||!editor.value||send.getAttribute('aria-disabled')==='true')return;
+    clicks++;document.querySelector('#clicks').value=String(clicks);
+    const message={id:String(++sequence),from_shop_id:'700',to_id:current.to_id,content:{text:editor.value},status:result.value==='failed'?'failed':result.value==='uncertain'?'pending':'sent'};
+    current.messages.push(message);current.latest_message_id=message.id;const n=document.createElement('div');n.textContent=message.content.text;n.__reactFiber$target={memoizedProps:{message}};messages.append(n);editor.value='';ready();
+  });
+  document.querySelector('#next').onclick=loadNext;document.querySelector('#reset').onclick=reset;fault.onchange=reset;
+  new IntersectionObserver(entries=>{if(entries.some(e=>e.isIntersecting))loadNext()}).observe(loader);
+  window.__targetCountFixture={loadNext,reset,get loaded(){return loaded},get clicks(){return clicks},flags};reset();
+})();
+</script></body></html>

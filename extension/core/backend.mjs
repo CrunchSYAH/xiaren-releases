@@ -1,4 +1,5 @@
 import { initialState, previewTask, reduceQueue, currentText, currentMessage } from './queue.mjs';
+import { pruneHistory } from './history-window.mjs';
 import { validatePage, validateChat, validateImageChat } from './page-guards.mjs';
 import { inspectPage } from '../page-snapshot.mjs';
 import { inspectFilters } from '../page-filters-page.mjs';
@@ -245,6 +246,12 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
     if (saved.creatorQueue && saved.creatorQueue.version !== 1) throw new Error('本地记录版本不兼容，请先导出备份');
     state = saved.creatorQueue || initialState();
     workspace = saved.creatorWorkspace || null;
+    if (saved.creatorQueue) {
+      // 释放已满 30 天的防重发记录，避免旧数据长期占住存储；失败只影响清理，
+      // 判重本身会按窗口惰性放行，不因此阻断启动。
+      try { if (pruneHistory(state.history, now())) await api.storage.local.set({ creatorQueue: state }); }
+      catch { /* 保留原存储，下次启动再试 */ }
+    }
     if (saved.creatorDiagnostics?.version === 1) {
       diagnostics.events = (Array.isArray(saved.creatorDiagnostics.events) ? saved.creatorDiagnostics.events : []).map(cleanLogEvent).filter(Boolean);
       diagnostics.dropped = Number.isSafeInteger(saved.creatorDiagnostics.dropped) && saved.creatorDiagnostics.dropped >= 0 ? saved.creatorDiagnostics.dropped : 0;
@@ -765,7 +772,7 @@ export function createBackend(api, { now = () => Date.now(), uid = () => crypto.
       checkConfig(message.config, page);
       if (message.type === 'panel:preview') {
         if (state.task && state.task.status !== 'completed') throw new Error('请先结束当前任务，再建立新任务');
-        const result = previewTask(state, message.config);
+        const result = previewTask(state, message.config, { now: now() });
         await checkImages(message.config.messages);
         const key = previewKey(sender), token = uid();
         rememberPreview(key, { token, signature: signature(message.config), pageId: workspace.pageId, shopId: page.shop.id });

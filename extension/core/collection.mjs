@@ -3,10 +3,13 @@
 import { normalizeSource, matchesSource } from './audience.mjs';
 import { observeLeaderboard } from './leaderboard.mjs';
 import { observeAffiliates } from './affiliate-source.mjs';
+import { activeHistory } from './history-window.mjs';
 
 export const rosterSignature = creators => JSON.stringify(creators.map(({ id, name, rowKey, chatAvailable }) => [id, name, rowKey, chatAvailable]));
-const eligible = (state, shopId, row) => row.chatAvailable === true &&
-  !Object.hasOwn(state.history?.[shopId] || {}, row.id) && !Object.hasOwn(state.denied?.[shopId] || {}, row.id);
+// 30 天窗口外的历史记录已经释放，这里与队列用同一判断，避免准备名单时
+// 仍把可重新建联的达人挡在外面。
+const eligible = (state, shopId, row, now) => row.chatAvailable === true &&
+  !activeHistory(state, shopId, row.id, now) && !Object.hasOwn(state.denied?.[shopId] || {}, row.id);
 const candidateTargetFor = target => Math.min(200, target + Math.ceil(target / 10));
 // The site appends ten rows per request and each request can take seconds on a
 // slow network, so a roster counts as stalled only after this silence.
@@ -29,14 +32,14 @@ function checkSelection(c) {
   if (!selectable(c) || c.status !== 'ready' || c.pagePending) throw new Error('名单尚未备齐或已进入任务，不能修改选择');
 }
 
-function refreshSelection(c, state) {
-  const unavailableIds = c.candidates.filter(row => !matchesSource(c.source, row) || !eligible(state, c.binding.shopId, row)).map(row => row.id);
+function refreshSelection(c, state, now) {
+  const unavailableIds = c.candidates.filter(row => !matchesSource(c.source, row) || !eligible(state, c.binding.shopId, row, now)).map(row => row.id);
   const next = withSelection({ ...c, unavailableIds }, c.selectedIds);
   if (JSON.stringify(next.selectedIds) !== JSON.stringify(c.selectedIds) || JSON.stringify(unavailableIds) !== JSON.stringify(c.unavailableIds)) next.selectionRevision++;
   return next;
 }
 
-function selectRows(rows, state, shopId, source, startId) {
+function selectRows(rows, state, shopId, source, startId, now) {
   // Keep the complete observed roster for replacement checks; only audience
   // selection starts at the fixed visible row captured during preparation.
   const candidates = source.type === 'marketplace' && source.startPosition === 'current' ? rows.slice(rows.findIndex(row => row.id === startId)) : rows;
@@ -47,7 +50,7 @@ function selectRows(rows, state, shopId, source, startId) {
     seen.add(row.id);
     if (source.type === 'specified' && !source.creatorIds.includes(row.id)) return false;
     matched++;
-    if (!matchesSource(source, row) || !eligible(state, shopId, row)) { excluded++; return false; }
+    if (!matchesSource(source, row) || !eligible(state, shopId, row, now)) { excluded++; return false; }
     return true;
   });
   return { creators, matched, missing: source.type === 'specified' ? source.creatorIds.length - matched : 0, excluded };
@@ -89,7 +92,7 @@ export function updateCollection(collection, page, state, binding, now) {
   }
   if (c.source.type === 'affiliates') {
     c = observeAffiliates(c, page, state, now);
-    if (c.status === 'ready' && c.creators.some(row => !matchesSource(c.source, row) || !eligible(state, binding.shopId, row))) return invalid('锁定名单的历史或拒绝记录已变化，请重新准备名单');
+    if (c.status === 'ready' && c.creators.some(row => !matchesSource(c.source, row) || !eligible(state, binding.shopId, row, now))) return invalid('锁定名单的历史或拒绝记录已变化，请重新准备名单');
     return c;
   }
   if (c.source.type === 'leaderboard') {
@@ -98,16 +101,16 @@ export function updateCollection(collection, page, state, binding, now) {
     rows = c.observed;
   } else if (rows.length < c.observed.length || rosterSignature(rows.slice(0, c.observed.length)) !== rosterSignature(c.observed)) return invalid('列表已替换、重排或入口已变化，请重新准备名单');
   if (c.status === 'ready') {
-    if (!selectable(c) && c.creators.some(row => !matchesSource(c.source, row) || !eligible(state, binding.shopId, row))) return invalid('锁定名单的历史或拒绝记录已变化，请重新准备名单');
+    if (!selectable(c) && c.creators.some(row => !matchesSource(c.source, row) || !eligible(state, binding.shopId, row, now))) return invalid('锁定名单的历史或拒绝记录已变化，请重新准备名单');
     if (['matched', 'missing', 'excluded'].some(key => c[key] === undefined)) {
-      const { creators, ...counts } = selectRows(c.observed, state, binding.shopId, c.source, c.startId);
+      const { creators, ...counts } = selectRows(c.observed, state, binding.shopId, c.source, c.startId, now);
       Object.assign(c, counts);
     }
-    return selectable(c) ? refreshSelection(c, state) : c;
+    return selectable(c) ? refreshSelection(c, state, now) : c;
   }
   if (rows.length > c.observed.length) c.progressAt = now;
   c.observed = rows.map(({ id, name, rowKey, chatAvailable, page }) => ({ id, name, rowKey, chatAvailable, ...(page === undefined ? {} : { page }) }));
-  const { creators, ...counts } = selectRows(c.observed, state, binding.shopId, c.source, c.startId);
+  const { creators, ...counts } = selectRows(c.observed, state, binding.shopId, c.source, c.startId, now);
   c.creators = creators.slice(0, c.target);
   Object.assign(c, counts);
   c.count = c.creators.length;
@@ -117,7 +120,7 @@ export function updateCollection(collection, page, state, binding, now) {
     // only appends newly observed, eligible identities. It never resets selection.
     const prior = new Set(c.candidates.map(row => row.id));
     c.candidates = (c.selectionInitialized ? [...c.candidates, ...creators.filter(row => !prior.has(row.id))] : creators).slice(0, c.candidateTarget);
-    c = refreshSelection(c, state);
+    c = refreshSelection(c, state, now);
     if (!c.selectionInitialized) c = withSelection(c, c.candidates.slice(0, c.target).map(row => row.id));
   }
   if (selectable(c) ? !c.candidateShortfall : !c.shortfall) {

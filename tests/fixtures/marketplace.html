@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>虚构达人页面 · 仅本地测试</title><style>
+*{box-sizing:border-box}body{font:15px/1.6 "Microsoft YaHei",sans-serif;margin:0;background:#f5f6f8;color:#263548}header{padding:16px 28px;background:#e9492d;color:white;font-size:20px;font-weight:700}.layout{max-width:1250px;margin:0 auto;padding:28px}.test-label{color:#953c28}.toolbar{display:flex;gap:16px;flex-wrap:wrap;align-items:end;padding:18px;background:white;border:1px solid #dce3ec;margin:22px 0}.toolbar label{display:grid;gap:6px}button,select,textarea{font:inherit;padding:9px 12px;border:1px solid #bec8d4;border-radius:4px;background:white;color:inherit}button{cursor:pointer}button:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #e9492d;outline-offset:2px}table{width:100%;border-collapse:collapse;background:white}td,th{padding:18px;text-align:left;border-bottom:1px solid #dce3ec}th{background:#edf0f4}.kol-card-item-name{font-weight:700}.kol-card-item-username{font-size:13px;color:#647488}.count-line{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}#sidebar-minichat-list{margin-top:28px;background:white;padding:22px;border:1px solid #dce3ec}textarea{display:block;width:100%;min-height:90px;margin:14px 0}.pqq6o4R57Y{display:inline-block;background:#e9492d;color:white;padding:10px 18px;cursor:pointer}.plW8rzAMob{display:block;min-width:60px;min-height:18px}.plW8rzAMob[aria-disabled=true]{opacity:.5;cursor:default}#messagesContainer{min-height:60px;max-height:320px;overflow:auto;margin:12px 0}.message{padding:12px;background:#e6f4ed;margin:8px 0}.message.pending{background:#fff0cc}.message.failed{background:#fce0db}.message small{display:block;margin-top:5px;color:#596879}#verification{background:#ffe2d8;color:#8f2d19;border:1px solid #e9492d;padding:15px}i{font-style:normal}h1{font-size:25px;margin-bottom:4px}h2{font-size:20px}.test-help{font-size:13px;color:#5e6d80}a{color:#b63820}[hidden]{display:none!important}@media(max-width:650px){.layout{padding:16px}td,th{padding:12px}.toolbar{gap:12px}.toolbar label{width:100%}}
+</style></head><body>
+<header>虾仁本地测试 · 虚构店铺</header><main class="layout">
+<h1>达人广场 · 本地交互副本</h1><p class="test-label">此页仅沿用已核实的列表与聊天结构，所有数据均为虚构；不会向真实达人发送消息。</p>
+<div class="count-line"><strong id="fixture-shop"></strong><span>本页发送点击：<output id="click-count">0</output> 次</span></div>
+<div class="toolbar"><label>点击发送后的模拟结果 <select id="result-mode"><option value="sent">成功取得回执</option><option value="uncertain">只有本地回显，无可靠回执</option><option value="failed">明确发送失败</option></select></label>
+<label>页面异常场景 <select id="page-mode"><option value="normal">正常页面</option><option value="recipient">聊天收件人不符（显示名不变）</option><option value="captcha">出现验证提示</option><option value="watermark">缺少回执依据（空白历史）</option><option value="controls">发送控件缺失</option></select></label>
+<button id="new-batch" type="button">换一组虚构店铺</button></div>
+<p class="test-help">每次测试前设定场景，再回插件读取名单并启动。成功后反复测试可换一组虚构店铺，以保留原有防重发记录。验证暂停时可在任务运行中切换异常场景。</p>
+<p id="verification" class="captcha" role="alert" hidden>Verification required · 本地模拟验证提示，请将“页面异常场景”切回正常后继续。</p>
+<table><thead><tr><th>达人</th><th>聊天</th></tr></thead><tbody>
+<tr class="kol-card-item" data-row-key="0_101"><td><div class="kol-card-item-name">Ayu 示例达人</div><div class="kol-card-item-username">ayu_demo</div></td><td><button type="button"><svg width="18" height="18"><use href="#icon-chat-new"></use></svg> 打开聊天</button></td></tr>
+<tr class="kol-card-item" data-row-key="1_102"><td><div class="kol-card-item-name">Bima 示例达人</div><div class="kol-card-item-username">bima_demo</div></td><td><button type="button"><svg width="18" height="18"><use href="#icon-chat-new"></use></svg> 打开聊天</button></td></tr>
+<tr class="kol-card-item" data-row-key="2_103"><td><div class="kol-card-item-name">Citra 示例达人</div><div class="kol-card-item-username">citra_demo</div></td><td><button type="button"><svg width="18" height="18"><use href="#icon-chat-new"></use></svg> 打开聊天</button></td></tr>
+</tbody></table>
+<section id="sidebar-minichat-list" hidden><h2 class="lyWL3rDmij"></h2><p class="test-help">发送按钮只生成本页虚构消息。记录只用于本次本地测试。</p><div id="messagesContainer"></div><textarea aria-label="模拟消息" placeholder="插件将在本地模拟发送模式填入文本"></textarea><div class="pqq6o4R57Y"><i class="plW8rzAMob" role="button" tabindex="0" aria-disabled="true">模拟发送</i></div></section>
+<p class="test-help"><a href="/" target="_blank" rel="noopener">查看本地插件测试步骤</a> · 运行任务时保持此页打开。</p></main>
+<script>
+window.__fixtureClickCount=0;
+let batch=0;try{const saved=Number(localStorage.getItem('creatorLocalTestBatch'));if(Number.isSafeInteger(saved)&&saved>=0&&saved<100000)batch=saved}catch{}
+const shop=()=>({shopId:700+batch,shopName:`演示店铺（虚构）第 ${batch+1} 组`,isLoggedIn:true});
+window.__$unstable_useRootStoreOutside=shop;
+const rows=[...document.querySelectorAll('tr.kol-card-item')];
+let current=null,currentCreator=null,sequence=1000;
+const conversations=new Map();
+const editor=document.querySelector('textarea'),root=document.querySelector('#sidebar-minichat-list'),messages=document.querySelector('#messagesContainer'),send=document.querySelector('.plW8rzAMob'),pageMode=document.querySelector('#page-mode');
+function updateSendReady(){send.setAttribute('aria-disabled',editor.value?'false':'true')}
+function applyPageMode(){
+  const mode=pageMode.value;document.querySelector('#verification').hidden=mode!=='captcha';send.hidden=mode==='controls';
+  if(!current)return;
+  current.to_id=mode==='recipient'?'9999':String(currentCreator.shopeeUserId);
+  current.latest_message_id=mode==='watermark'?'':current.lastId;
+  editor.__reactFiber$fixture={memoizedProps:{shopId:shop().shopId,buyerId:current.to_id,currentConversation:current,currentUser:{id:7000}}};
+}
+function appendMessage(message){
+  const node=document.createElement('div');node.className=`message ${message.status}`;
+  node.textContent=message.content.text;
+  const status=document.createElement('small');status.textContent=message.status==='pending'?'仅本地回显，等待确认':message.status==='failed'?'明确失败':'模拟回执已确认';node.append(status);
+  node.__reactFiber$fixture={memoizedProps:{message}};messages.append(node);
+}
+document.querySelector('#fixture-shop').textContent=shop().shopName;
+editor.addEventListener('input',updateSendReady);pageMode.addEventListener('change',applyPageMode);
+document.querySelector('#new-batch').addEventListener('click',()=>{
+  batch=(batch+1)%100000;try{localStorage.setItem('creatorLocalTestBatch',String(batch))}catch{}
+  document.querySelector('#fixture-shop').textContent=shop().shopName;
+  conversations.clear();current=null;currentCreator=null;root.hidden=true;messages.replaceChildren();editor.value='';
+  window.__fixtureClickCount=0;document.querySelector('#click-count').value='0';pageMode.value='normal';applyPageMode();updateSendReady();
+});
+rows.forEach((row,index)=>{
+  const data={affiliateId:101+index,shopeeUserId:201+index,displayName:row.querySelector('.kol-card-item-name').textContent,username:row.querySelector('.kol-card-item-username').textContent};
+  row.__reactFiber$fixture={memoizedProps:{data}};
+  row.querySelector('button').addEventListener('click',()=>{
+    currentCreator=data;
+    if(!conversations.has(data.shopeeUserId))conversations.set(data.shopeeUserId,{id:String(900+index),to_id:String(data.shopeeUserId),shop_id:String(shop().shopId),latest_message_id:String(sequence),lastId:String(sequence),opposite_last_deliver_msg_id:'0',messages:[]});
+    current=conversations.get(data.shopeeUserId);
+    root.hidden=false; root.querySelector('.lyWL3rDmij').textContent=data.displayName; messages.replaceChildren(); editor.value='';
+    for(const message of current.messages)appendMessage(message);applyPageMode();updateSendReady();
+  });
+});
+send.addEventListener('click',()=>{
+  if(!current||!editor.value||send.getAttribute('aria-disabled')==='true'||send.hidden)return;
+  window.__fixtureClickCount++;
+  document.querySelector('#click-count').value=String(window.__fixtureClickCount);
+  const status=document.querySelector('#result-mode').value,id=String(++sequence),text=editor.value;
+  const message={id,from_id:'7000',from_shop_id:String(shop().shopId),to_id:current.to_id,content:{text},status:status==='uncertain'?'pending':status};
+  current.messages.push(message);appendMessage(message);current.lastId=id;current.latest_message_id=id;if(status==='sent')current.opposite_last_deliver_msg_id=id;editor.value='';updateSendReady();
+});
+</script></body></html>

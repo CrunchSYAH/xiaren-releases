@@ -1,4 +1,5 @@
 import { normalizeMessages } from './queue.mjs';
+import { MAX_TEMPLATE_LENGTH, MAX_LINK_LENGTH, isDeliverableLink, hasUnknownVariable } from './message-rules.mjs';
 
 const LIMIT = 50, MAX_BYTES = 512 * 1024;
 const corrupt = () => new Error('本地消息模板损坏或版本不兼容；原数据已保留，请先检查备份');
@@ -16,13 +17,11 @@ function normalizeDraft(draft) {
     return { name, messages: normalizeMessages(draft.messages) };
   }
   const template = draft.template;
-  if (typeof template !== 'string' || !template.trim() || template.length > 2000) throw new Error('模板话术不能为空，最多2000个字符');
-  const remainder = template.replace(/\{\{name\}\}/g, '');
-  if (remainder.includes('{{') || remainder.includes('}}')) throw new Error('模板话术仅支持 {{name}} 变量，请检查未知或未闭合变量');
+  if (typeof template !== 'string' || !template.trim() || template.length > MAX_TEMPLATE_LENGTH) throw new Error(`模板话术不能为空，最多${MAX_TEMPLATE_LENGTH}个字符`);
+  if (hasUnknownVariable(template)) throw new Error('模板话术仅支持 {{name}} 变量，请检查未知或未闭合变量');
   const productLink = typeof draft.productLink === 'string' ? draft.productLink.trim() : '';
-  let url;
-  try { url = new URL(productLink); } catch { throw new Error('产品链接必须是完整的 HTTP 或 HTTPS 网址'); }
-  if (!productLink || productLink.length > 2000 || /\s/.test(productLink) || !/^https?:\/\//i.test(productLink) || !['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error('产品链接必须是不含空白或凭证的完整 HTTP 或 HTTPS 网址，最多2000个字符');
+  try { new URL(productLink); } catch { throw new Error('产品链接必须是完整的 HTTP 或 HTTPS 网址'); }
+  if (!isDeliverableLink(productLink)) throw new Error(`产品链接必须是不含空白或凭证的完整 HTTP 或 HTTPS 网址，最多${MAX_LINK_LENGTH}个字符`);
   return { name, template, productLink };
 }
 

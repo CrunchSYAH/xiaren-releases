@@ -1,5 +1,6 @@
 import { matchesAffiliateSnapshot, resolveAffiliateIdentities } from './affiliate-resolver.mjs';
 import { matchesSource } from './audience.mjs';
+import { activeHistory } from './history-window.mjs';
 
 export const AFFILIATE_PATH = '/portal/web-seller-affiliate/kol_marketplace/detail';
 const invalid = (c, reason) => ({ ...c, status: 'invalid', action: null, reason });
@@ -27,7 +28,7 @@ export function observeAffiliates(c, page, state, now) {
   const observed = resolved.identities.map(identity => ({ id: identity.shopeeUserId, name: identity.name, username: identity.username, rowKey: identity.affiliateId, affiliateId: identity.affiliateId, chatAvailable: true }));
   c.observed = observed;
   if (c.status === 'ready') return c;
-  c.creators = observed.filter(row => matchesSource(c.source, row) && !Object.hasOwn(state.history?.[c.binding.shopId] || {}, row.id) && !Object.hasOwn(state.denied?.[c.binding.shopId] || {}, row.id));
+  c.creators = observed.filter(row => matchesSource(c.source, row) && !activeHistory(state, c.binding.shopId, row.id, now) && !Object.hasOwn(state.denied?.[c.binding.shopId] || {}, row.id));
   c.count = c.creators.length; c.shortfall = c.target - c.count; c.matched = observed.length; c.missing = ids.length - observed.length; c.excluded = observed.length - c.count;
   if (c.excluded) { c.status = 'insufficient'; c.reason = '指定联盟伙伴被筛选、历史或拒绝记录排除，不能补人启动'; c.action = null; }
   else if (observed.length === ids.length) { c.status = 'ready'; c.reason = '目标名单已备齐并锁定'; c.action = null; }

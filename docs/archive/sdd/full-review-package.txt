@@ -1,0 +1,2938 @@
+FILE: scripts\preview.mjs
+import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const types = { '.html': 'text/html; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const server = http.createServer(async (request, response) => {
+  try {
+    const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname);
+    const file = path.resolve(root, `.${pathname === '/' ? '/tests/fixtures/workbench.html' : pathname}`);
+    const relative = path.relative(root, file);
+    if (relative.startsWith('..') || path.isAbsolute(relative) || !['extension', 'tests'].includes(relative.split(path.sep)[0]) || !types[path.extname(file)]) { response.writeHead(403).end(); return; }
+    const body = await readFile(file);
+    response.writeHead(200, { 'content-type': types[path.extname(file)], 'cache-control': 'no-store' }).end(body);
+  } catch { response.writeHead(404).end('Not found'); }
+});
+server.listen(4177, '127.0.0.1', () => process.stdout.write('本地模拟工作台 http://127.0.0.1:4177/ （仅虚构数据）\n'));
+FILE: scripts\check.mjs
+import { readdir, readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const files = [];
+async function walk(directory) {
+  for (const entry of await readdir(path.join(root, directory), { withFileTypes: true })) {
+    const file = path.join(directory, entry.name);
+    if (entry.isDirectory()) await walk(file);
+    else if (/\.(mjs|js)$/.test(file)) files.push(file);
+  }
+}
+await walk('extension'); await walk('scripts');
+for (const file of files) {
+  const result = spawnSync(process.execPath, ['--check', path.join(root, file)], { encoding: 'utf8' });
+  assert.equal(result.status, 0, `${file}: ${result.stderr}`);
+}
+const manifest = JSON.parse(await readFile(path.join(root, 'extension/manifest.json'), 'utf8'));
+assert.equal(manifest.manifest_version, 3);
+assert.deepEqual(manifest.permissions, ['storage', 'scripting']);
+assert.deepEqual(manifest.host_permissions, ['https://seller.shopee.co.id/*']);
+assert.equal(manifest.externally_connectable, undefined);
+assert.equal(manifest.content_scripts, undefined, '只对自建标签页按需注入');
+const extensionFiles = await Promise.all(files.filter(file => file.startsWith('extension')).map(file => readFile(path.join(root, file), 'utf8')));
+assert.ok(extensionFiles.every(source => !/\b(?:fetch|XMLHttpRequest|WebSocket)\s*\(/.test(source)), '扩展不应向外部服务传输数据');
+process.stdout.write(`语法检查 ${files.length} 个文件通过；Manifest 权限及无外部请求检查通过。\n`);
+FILE: tests\queue.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+const api = await import('../extension/core/queue.mjs');
+const { initialState, previewTask, reduceQueue } = api;
+const binding = { tabId: 3, pageId: 'page-1' };
+const config = (extra = {}) => ({ shop: { id: 'shop-1', name: '店铺' }, creators: [{ id: 'a', name: 'Ana' }, { id: 'b', name: 'Budi' }], template: 'Hi {{name}}', intervalSeconds: 10, limit: 10, mode: 'send', ...extra });
+let sequence = 0;
+function step(state, event, now = 1000) {
+  return reduceQueue(state, event, { now, uid: () => `id-${++sequence}` });
+}
+function start(extra = {}, state = initialState()) {
+  return step(state, { type: 'start', config: config(extra), binding }).state;
+}
+function identity(state, extra = {}) {
+  return { ...state.task.binding, shopId: state.task.config.shop.id, sessionId: state.task.sessionId, ...extra };
+}
+function sendReady(state) {
+  state = step(state, { type: 'poll', ...identity(state) }).state;
+  state = step(state, { type: 'prepared', ...identity(state), itemId: 'a', ok: true }).state;
+  return step(state, { type: 'poll', ...identity(state) });
+}
+function authorize(state) {
+  return step(state, { type: 'authorize', ...identity(state), itemId: 'a' });
+}
+function result(state, outcome = 'sent', now = 2000) {
+  return step(state, { type: 'result', ...identity(state), itemId: 'a', outcome }, now);
+}
+
+test('exports the pure queue API', () => {
+  for (const key of ['initialState', 'previewTask', 'reduceQueue']) assert.equal(typeof api[key], 'function', `缺少 ${key}`);
+});
+
+test('initial state is fresh and serializable', () => {
+  assert.deepEqual(initialState(), { version: 1, task: null, history: {}, denied: {} });
+  assert.notEqual(initialState().history, initialState().history);
+});
+
+test('validates template, identities, limits and storage bounds with Chinese errors', () => {
+  const invalid = [
+    { template: '{{unknown}}' }, { template: '  ' }, { template: 'x'.repeat(2001) },
+    { template: '{{name' }, { creators: [] }, { creators: [{ id: 'a', name: ' ' }] },
+    { creators: [{ id: '', name: 'A' }] }, { shop: { id: '', name: '店' } },
+    { shop: { id: 's', name: '' } }, { intervalSeconds: 0 }, { intervalSeconds: Infinity },
+    { intervalSeconds: '2' }, { limit: 0 }, { limit: 1.5 }, { mode: 'other' },
+    { creators: Array.from({ length: 201 }, (_, i) => ({ id: `${i}`, name: 'A' })) },
+  ];
+  for (const extra of invalid) assert.throws(() => previewTask(initialState(), config(extra)), /[\u4e00-\u9fff]/);
+});
+
+test('preview renders names literally, deduplicates and applies limit', () => {
+  const preview = previewTask(initialState(), config({ creators: [{ id: 'a', name: '$&' }, { id: 'a', name: 'dup' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }], limit: 2 }));
+  assert.equal(preview.sendableCount, 2);
+  assert.equal(preview.skippedCount, 2);
+  assert.equal(preview.items[0].text, 'Hi $&');
+  assert.equal(preview.items.filter(item => item.status === 'pending').length, 2);
+});
+
+test('deny is shop isolated and safe for prototype property keys', () => {
+  let state = step(initialState(), { type: 'deny', shopId: '__proto__', creatorId: 'constructor', name: 'A', blocked: true }).state;
+  const special = config({ shop: { id: '__proto__', name: '店' }, creators: [{ id: 'constructor', name: 'A' }] });
+  assert.equal(previewTask(state, special).sendableCount, 0);
+  assert.equal(previewTask(state, config()).sendableCount, 2);
+  state = step(state, { type: 'deny', shopId: '__proto__', creatorId: 'constructor', blocked: false }).state;
+  assert.equal(previewTask(state, special).sendableCount, 1);
+  assert.equal({}.polluted, undefined);
+});
+
+test('only one unfinished task may run and all-skipped tasks cannot start', () => {
+  const state = start();
+  assert.throws(() => start({}, state), /[\u4e00-\u9fff]/);
+  const paused = step(state, { type: 'pause' }).state;
+  assert.throws(() => start({}, paused), /[\u4e00-\u9fff]/);
+  let denied = step(initialState(), { type: 'deny', shopId: 'shop-1', creatorId: 'a', blocked: true }).state;
+  assert.throws(() => start({ creators: [{ id: 'a', name: 'A' }] }, denied), /[\u4e00-\u9fff]/);
+});
+
+test('poll matches full identity and dispatches each stage once', () => {
+  let state = start();
+  for (const extra of [{ tabId: 4 }, { pageId: 'other' }, { shopId: 'other' }, { sessionId: 'old' }]) {
+    assert.equal(step(state, { type: 'poll', ...identity(state, extra) }).command, null);
+  }
+  const preparation = step(state, { type: 'poll', ...identity(state) });
+  assert.deepEqual(preparation.command, { type: 'prepare', taskId: state.task.id, sessionId: state.task.sessionId, itemId: 'a', creator: { id: 'a', name: 'Ana' }, text: 'Hi Ana', mode: 'send' });
+  state = preparation.state;
+  assert.equal(step(state, { type: 'poll', ...identity(state) }).command, null);
+  assert.equal(step(state, { type: 'prepared', ...identity(state, { sessionId: 'old' }), itemId: 'a', ok: true }).state.task.items[0].status, 'preparing');
+  state = step(state, { type: 'prepared', ...identity(state), itemId: 'a', ok: true }).state;
+  const sending = step(state, { type: 'poll', ...identity(state) });
+  assert.equal(sending.command.type, 'send');
+  assert.equal(sending.state.history['shop-1'].a.status, 'uncertain');
+  assert.equal(step(sending.state, { type: 'poll', ...identity(state) }).command, null);
+});
+
+test('authorization is single use and results require authorization', () => {
+  let state = sendReady(start()).state;
+  assert.equal(result(state).state.task.items[0].status, 'sending');
+  assert.equal(step(state, { type: 'authorize', ...identity(state), itemId: 'b' }).command, null);
+  const permit = authorize(state);
+  assert.deepEqual(permit.command, { type: 'permit', taskId: state.task.id, sessionId: state.task.sessionId, itemId: 'a', mode: 'send' });
+  state = permit.state;
+  assert.equal(authorize(state).command, null);
+  state = result(state).state;
+  assert.equal(state.history['shop-1'].a.status, 'confirmed');
+  assert.equal(result(state, 'uncertain').state.task.items[0].status, 'sent');
+});
+
+test('interval is measured from result and never catches up', () => {
+  const state = result(authorize(sendReady(start()).state).state, 'sent', 50000).state;
+  assert.equal(state.task.nextAt, 60000);
+  assert.equal(step(state, { type: 'poll', ...identity(state) }, 59999).command, null);
+  assert.equal(step(state, { type: 'poll', ...identity(state) }, 100000).command.itemId, 'b');
+});
+
+test('pause during preparation waits and then cancels without sending', () => {
+  let state = start();
+  state = step(state, { type: 'poll', ...identity(state) }).state;
+  state = step(state, { type: 'pause', reason: '检查' }).state;
+  assert.equal(state.task.status, 'pausing');
+  state = step(state, { type: 'prepared', ...identity(state), itemId: 'a', ok: true }).state;
+  assert.equal(state.task.status, 'paused');
+  assert.equal(state.task.items[0].status, 'pending');
+  assert.equal(step(state, { type: 'poll', ...identity(state) }).command, null);
+});
+
+test('pause before authorization clears intent and cancels permit', () => {
+  let state = sendReady(start()).state;
+  state = step(state, { type: 'pause' }).state;
+  assert.equal(state.task.status, 'paused');
+  assert.equal(state.task.items[0].status, 'pending');
+  assert.equal(Object.hasOwn(state.history['shop-1'], 'a'), false);
+  assert.equal(authorize(state).command, null);
+});
+
+test('stop after authorization waits for result and takes precedence', () => {
+  let state = authorize(sendReady(start()).state).state;
+  state = step(state, { type: 'stop' }).state;
+  assert.equal(state.task.status, 'stopping');
+  assert.equal(authorize(state).command, null);
+  state = result(state).state;
+  assert.equal(state.task.status, 'stopped');
+  assert.equal(state.task.items[0].status, 'sent');
+});
+
+test('interrupt after authorization preserves uncertain and invalidates old session', () => {
+  let state = authorize(sendReady(start()).state).state;
+  const oldIdentity = identity(state);
+  state = step(state, { type: 'interrupt', reason: '页面替换' }).state;
+  assert.equal(state.task.status, 'paused');
+  assert.equal(state.task.items[0].status, 'uncertain');
+  assert.equal(step(state, { type: 'result', ...oldIdentity, itemId: 'a', outcome: 'sent' }).state.task.items[0].status, 'uncertain');
+  assert.throws(() => step(state, { type: 'resume', binding }), /[\u4e00-\u9fff]/);
+  state = step(state, { type: 'resolve', itemId: 'a', resolution: 'skip' }).state;
+  assert.equal(state.history['shop-1'].a.status, 'uncertain');
+  state = step(state, { type: 'resume', binding: { tabId: 4, pageId: 'new' } }).state;
+  assert.notEqual(state.task.sessionId, oldIdentity.sessionId);
+  assert.equal(step(state, { type: 'poll', ...identity(state) }).command.itemId, 'b');
+});
+
+test('interrupt before authorization safely returns item to pending', () => {
+  for (const stage of ['preparing', 'prepared', 'sending']) {
+    let state = start();
+    state = step(state, { type: 'poll', ...identity(state) }).state;
+    if (stage !== 'preparing') state = step(state, { type: 'prepared', ...identity(state), itemId: 'a', ok: true }).state;
+    if (stage === 'sending') state = step(state, { type: 'poll', ...identity(state) }).state;
+    state = step(state, { type: 'interrupt', reason: '关闭' }).state;
+    assert.equal(state.task.items[0].status, 'pending');
+    assert.equal(state.history['shop-1']?.a, undefined);
+  }
+});
+
+test('prepare failure pauses and resume skips failed items', () => {
+  let state = start();
+  state = step(state, { type: 'poll', ...identity(state) }).state;
+  state = step(state, { type: 'prepared', ...identity(state), itemId: 'a', ok: false, reason: '找不到输入框' }).state;
+  assert.equal(state.task.status, 'paused');
+  assert.equal(state.task.items[0].status, 'failed');
+  state = step(state, { type: 'resume', binding }).state;
+  assert.equal(state.task.items[0].status, 'skipped');
+  assert.equal(step(state, { type: 'poll', ...identity(state) }).command.itemId, 'b');
+});
+
+test('failed sending pauses conservatively and wrong outcome becomes uncertain', () => {
+  for (const outcome of ['failed', 'uncertain', 'rehearsed', 'nonsense']) {
+    const state = result(authorize(sendReady(start()).state).state, outcome).state;
+    assert.equal(state.task.status, 'paused');
+    assert.equal(state.history['shop-1'].a.status, 'uncertain');
+    assert.equal(state.task.items[0].status, outcome === 'failed' ? 'failed' : 'uncertain');
+  }
+});
+
+test('dry run rehearses without polluting real history and rejects sent outcome', () => {
+  let state = authorize(sendReady(start({ mode: 'dry-run', creators: [{ id: 'a', name: 'Ana' }] })).state).state;
+  assert.deepEqual(state.history, {});
+  state = result(state, 'rehearsed').state;
+  assert.equal(state.task.status, 'completed');
+  assert.deepEqual(state.history, {});
+  assert.equal(previewTask(state, config()).sendableCount, 2);
+  const wrong = result(authorize(sendReady(start({ mode: 'dry-run' })).state).state, 'sent').state;
+  assert.equal(wrong.task.items[0].status, 'uncertain');
+});
+
+test('sent and uncertain history block all modes but isolate shops', () => {
+  let state = result(authorize(sendReady(start({ creators: [{ id: 'a', name: 'Ana' }] })).state).state).state;
+  assert.equal(state.task.status, 'completed');
+  assert.equal(previewTask(state, config()).sendableCount, 1);
+  assert.equal(previewTask(state, config({ mode: 'dry-run' })).sendableCount, 1);
+  assert.equal(previewTask(state, config({ shop: { id: 'shop-2', name: '店2' } })).sendableCount, 2);
+  state = start({}, state);
+  assert.equal(step(state, { type: 'poll', ...identity(state) }).command.itemId, 'b');
+});
+
+test('deny during a task skips pending work before dispatch', () => {
+  let state = start();
+  state = step(state, { type: 'deny', shopId: 'shop-1', creatorId: 'a', blocked: true }).state;
+  const next = step(state, { type: 'poll', ...identity(state) });
+  assert.equal(next.state.task.items[0].status, 'skipped');
+  assert.equal(next.command.itemId, 'b');
+});
+
+test('manual sent resolution confirms history and completed resume stays completed', () => {
+  let state = authorize(sendReady(start({ creators: [{ id: 'a', name: 'Ana' }] })).state).state;
+  state = step(state, { type: 'interrupt', reason: '断开' }).state;
+  state = step(state, { type: 'resolve', itemId: 'a', resolution: 'sent' }).state;
+  assert.equal(state.history['shop-1'].a.status, 'confirmed');
+  assert.equal(step(state, { type: 'resume', binding }).state.task.status, 'completed');
+});
+
+test('reducer and preview never mutate input or retain config references', () => {
+  const freeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); } return value; };
+  const source = config();
+  let state = step(freeze(initialState()), { type: 'start', config: source, binding }).state;
+  source.creators[0].name = 'changed';
+  assert.equal(state.task.config.creators[0].name, 'Ana');
+  previewTask(freeze(state), config());
+  state = step(freeze(state), { type: 'poll', ...identity(state) }).state;
+  assert.equal(state.task.items[0].status, 'preparing');
+});
+
+test('special history keys survive persisted round trips and still deduplicate', () => {
+  let state = start({ shop: { id: '__proto__', name: '店' }, creators: [{ id: 'constructor', name: 'A' }] });
+  state = step(state, { type: 'poll', ...identity(state) }).state;
+  state = step(state, { type: 'prepared', ...identity(state), itemId: 'constructor', ok: true }).state;
+  state = step(state, { type: 'poll', ...identity(state) }).state;
+  state = step(state, { type: 'authorize', ...identity(state), itemId: 'constructor' }).state;
+  state = step(state, { type: 'result', ...identity(state), itemId: 'constructor', outcome: 'sent' }).state;
+  state = JSON.parse(JSON.stringify(state));
+  assert.equal(state.history.__proto__.constructor.status, 'confirmed');
+  assert.equal(previewTask(state, config({ shop: { id: '__proto__', name: '店' }, creators: [{ id: 'constructor', name: 'A' }] })).sendableCount, 0);
+  assert.equal(Object.getPrototypeOf(state.history), Object.prototype);
+});
+
+test('manual skip keeps uncertain history across subsequent tasks and modes', () => {
+  let state = authorize(sendReady(start({ creators: [{ id: 'a', name: 'Ana' }] })).state).state;
+  state = step(state, { type: 'interrupt', reason: '断开' }).state;
+  state = step(state, { type: 'resolve', itemId: 'a', resolution: 'skip' }).state;
+  state = step(state, { type: 'resume', binding }).state;
+  for (const mode of ['send', 'dry-run']) assert.equal(previewTask(state, config({ mode })).items[0].status, 'skipped');
+  assert.equal(start({}, state).task.items[0].status, 'skipped');
+});
+
+test('stop during preparation and pause after prepared both safely return pending', () => {
+  let state = start();
+  state = step(state, { type: 'poll', ...identity(state) }).state;
+  state = step(state, { type: 'stop' }).state;
+  state = step(state, { type: 'pause' }).state;
+  assert.equal(state.task.status, 'stopping');
+  state = step(state, { type: 'prepared', ...identity(state), itemId: 'a', ok: false }).state;
+  assert.equal(state.task.status, 'stopped');
+  assert.equal(state.task.items[0].status, 'pending');
+  state = step(state, { type: 'resume', binding }).state;
+  state = step(state, { type: 'poll', ...identity(state) }).state;
+  state = step(state, { type: 'prepared', ...identity(state), itemId: 'a', ok: true }).state;
+  state = step(state, { type: 'pause' }).state;
+  assert.equal(state.task.items[0].status, 'pending');
+  assert.deepEqual(state.history, {});
+});
+
+test('a pause request wins over completion for an authorized final item', () => {
+  let state = authorize(sendReady(start({ creators: [{ id: 'a', name: 'Ana' }] })).state).state;
+  state = step(state, { type: 'pause', reason: '检查' }).state;
+  assert.equal(state.task.status, 'pausing');
+  state = result(state).state;
+  assert.equal(state.task.status, 'paused');
+  assert.equal(state.task.reason, '检查');
+  assert.equal(step(state, { type: 'resume', binding }).state.task.status, 'completed');
+});
+
+test('all newly denied pending items finish without producing a command', () => {
+  let state = start();
+  for (const creatorId of ['a', 'b']) state = step(state, { type: 'deny', shopId: 'shop-1', creatorId, blocked: true }).state;
+  const outcome = step(state, { type: 'poll', ...identity(state) });
+  assert.equal(outcome.command, null);
+  assert.equal(outcome.state.task.status, 'completed');
+});
+FILE: tests\guards.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { validatePage, validateChat, deliveryConfirmed } from '../extension/core/page-guards.mjs';
+
+const page = () => ({ origin: 'https://seller.shopee.co.id', shop: { id: '10', name: '示例店铺' }, creators: [{ id: '20', name: 'Ayu', rowKey: '0_99' }], chat: { shopId: '10', recipientId: '20', editorFound: true, sendFound: true, editorText: '', evidenceSupported: true, messages: [] }, blocked: false });
+
+test('可信店铺与稳定达人标识可读取，外域和空身份拒绝', () => {
+  assert.equal(validatePage(page()).shop.id, '10');
+  assert.throws(() => validatePage({ ...page(), origin: 'https://example.com' }), /印尼/);
+  assert.throws(() => validatePage({ ...page(), shop: null }), /店铺/);
+  assert.throws(() => validatePage({ ...page(), blocked: true }), /验证|限制/);
+});
+
+test('不能用同名达人替代聊天中的稳定标识', () => {
+  assert.equal(validateChat(page(), { id: '20' }, '10').recipientId, '20');
+  const p = page(); p.chat.recipientId = '21';
+  assert.throws(() => validateChat(p, { id: '20' }, '10'), /收件人/);
+  p.chat.recipientId = '20'; p.chat.shopId = '11';
+  assert.throws(() => validateChat(p, { id: '20' }, '10'), /店铺/);
+});
+
+test('缺失控件、未知回执能力和已有草稿阻止发送准备', () => {
+  for (const field of ['editorFound', 'sendFound', 'evidenceSupported']) {
+    const p = page(); p.chat[field] = false;
+    assert.throws(() => validateChat(p, { id: '20' }, '10'));
+  }
+  const p = page(); p.chat.editorText = '原有草稿';
+  assert.throws(() => validateChat(p, { id: '20' }, '10'), /草稿/);
+  p.chat.editorText = '本次文本';
+  assert.equal(validateChat(p, { id: '20' }, '10', '本次文本').editorText, '本次文本');
+});
+
+test('清空输入框不能充当成功回执，旧消息不能充当新消息', () => {
+  const p = page();
+  assert.equal(deliveryConfirmed(p.chat, ['1']), false);
+  p.chat.messages = [{ id: '1', confirmed: true }];
+  assert.equal(deliveryConfirmed(p.chat, ['1']), false);
+  p.chat.messages = [{ id: '2', confirmed: false }];
+  assert.equal(deliveryConfirmed(p.chat, ['1']), false);
+  p.chat.messages = [{ id: '2', confirmed: true }];
+  assert.equal(deliveryConfirmed(p.chat, ['1']), true);
+});
+FILE: extension\page-snapshot.mjs
+// Runs in the Shopee MAIN world. Only the explicitly selected public identity
+// fields and matching outgoing-message evidence cross into the extension.
+export function inspectPage(expectedText = '') {
+  const id = value => (typeof value === 'string' && /^\d+$/.test(value) && value !== '0') || (Number.isSafeInteger(value) && value > 0) ? String(value) : null;
+  const visible = node => !!node && node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden';
+  const fiberOf = node => {
+    const key = Object.keys(node || {}).find(key => key.startsWith('__reactFiber$'));
+    let fiber = key ? node[key] : null, root = fiber;
+    while (root?.return) root = root.return;
+    if (root?.stateNode?.current && root.stateNode.current !== root) fiber = fiber?.alternate || null;
+    return fiber;
+  };
+  const propsAlong = (node, predicate, depth = 24) => {
+    let fiber = fiberOf(node);
+    for (let index = 0; fiber && index < depth; index++, fiber = fiber.return) {
+      const props = fiber.memoizedProps;
+      if (props && predicate(props)) return props;
+    }
+    return null;
+  };
+  let shop = null;
+  try {
+    const store = typeof window.__$unstable_useRootStoreOutside === 'function' ? window.__$unstable_useRootStoreOutside() : null;
+    const shopId = id(store?.shopId);
+    const name = store?.shopName || store?.username;
+    if (shopId && typeof name === 'string' && name.trim() && store.isLoggedIn !== false) shop = { id: shopId, name: name.trim().slice(0, 120) };
+  } catch { /* Missing or changed store means unknown identity, never a guess. */ }
+  const creators = [];
+  for (const row of document.querySelectorAll('tr.kol-card-item[data-row-key]')) {
+    if (!visible(row) || creators.length >= 200) continue;
+    const props = propsAlong(row, props => !!(props.data?.shopeeUserId || props.record?.shopeeUserId), 6);
+    const record = props?.data?.shopeeUserId ? props.data : props?.record;
+    const creatorId = id(record?.shopeeUserId), affiliateId = id(record?.affiliateId);
+    const rowKey = row.getAttribute('data-row-key');
+    const name = row.querySelector('.kol-card-item-name')?.textContent?.trim();
+    if (!creatorId || !affiliateId || !/^\d+_\d+$/.test(rowKey || '') || rowKey.split('_').at(-1) !== affiliateId || !name) continue;
+    const chatButton = [...row.querySelectorAll('button')].find(button => [...button.querySelectorAll('use')].some(use => (use.getAttribute('xlink:href') || use.getAttribute('href')) === '#icon-chat-new'));
+    creators.push({ id: creatorId, name: name.slice(0, 120), username: String(record.username || '').slice(0, 120), rowKey, chatAvailable: !!chatButton && !chatButton.disabled });
+  }
+  const editor = [...document.querySelectorAll('#sidebar-minichat-list textarea')].find(visible);
+  let chat = null;
+  if (editor) {
+    const identity = propsAlong(editor, props => id(props.buyerId) && id(props.shopId));
+    const conversationProps = propsAlong(editor, props => !!props.currentConversation);
+    const conversation = conversationProps?.currentConversation;
+    const recipientId = id(identity?.buyerId), shopId = id(identity?.shopId);
+    const conversationMatches = !!recipientId && recipientId === id(conversation?.to_id) && !!shopId && shopId === id(conversation?.shop_id);
+    const send = document.querySelector('#sidebar-minichat-list .pqq6o4R57Y .plW8rzAMob');
+    const messageRoot = document.querySelector('#sidebar-minichat-list #messagesContainer');
+    const header = document.querySelector('#sidebar-minichat-list .lyWL3rDmij');
+    const messages = [], seen = new Set();
+    if (expectedText && conversationMatches && messageRoot) {
+      // No chat history content is returned. Only exact matches to the current
+      // task text, with a matching sender/recipient and server delivery evidence.
+      for (const node of messageRoot.querySelectorAll('div')) {
+        const props = propsAlong(node, props => !!(props.message || props.msg), 4);
+        const message = props?.message || props?.msg;
+        if (!message || typeof message !== 'object') continue;
+        const messageId = id(message.id ?? message.message_id);
+        const fromId = id(message.from_id), toId = id(message.to_id);
+        const text = typeof message.content === 'string' ? message.content : message.content?.text;
+        const outgoing = toId === recipientId && (id(message.from_shop_id) === shopId || (id(conversationProps.currentUser?.id) && fromId === id(conversationProps.currentUser.id)));
+        if (!messageId || seen.has(messageId) || text !== expectedText || !outgoing) continue;
+        seen.add(messageId);
+        const deliveredId = id(conversation.opposite_last_deliver_msg_id);
+        const failed = ['failed', 'error', 'sending', 'pending'].includes(String(message.status).toLowerCase());
+        const acknowledged = ['sent', 'success', 'delivered', 'read'].includes(String(message.status).toLowerCase());
+        const delivered = deliveredId && BigInt(deliveredId) >= BigInt(messageId);
+        messages.push({ id: messageId, confirmed: !failed && !!(acknowledged || delivered), failed });
+      }
+    }
+    chat = {
+      shopId: conversationMatches ? shopId : null,
+      recipientId: conversationMatches ? recipientId : null,
+      headerText: header?.textContent?.trim()?.slice(0, 120) || '',
+      editorFound: visible(editor) && !editor.disabled && !editor.readOnly,
+      sendFound: visible(send),
+      editorText: editor.value,
+      evidenceSupported: conversationMatches && !!messageRoot && typeof conversation?.opposite_last_deliver_msg_id !== 'undefined',
+      messages,
+    };
+  }
+  const blocked = [...document.querySelectorAll('[class*=captcha],iframe[src*=captcha],[role=alert]')].some(node => visible(node) && (/captcha|verification|verifikasi|too many|terlalu banyak|限制|验证/i.test(node.textContent || node.getAttribute('src') || node.className)));
+  return { origin: location.origin, path: location.pathname, shop, creators, chat, blocked };
+}
+FILE: extension\manifest.json
+{
+  "manifest_version": 3,
+  "name": "虾秘自用版 · 印尼达人建联",
+  "version": "0.1.0",
+  "description": "本地达人名单、话术预览和可暂停的自动私信队列，仅支持印尼 Shopee 卖家站。",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://seller.shopee.co.id/*"],
+  "background": { "service_worker": "background.mjs", "type": "module" },
+  "action": { "default_title": "打开达人建联工作台" },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'" }
+}
+FILE: extension\dashboard.mjs
+const $ = id => document.getElementById(id);
+const ui = Object.fromEntries([
+  'connection-dot', 'connection-state', 'shop-name', 'connection-detail', 'open-page', 'refresh-list', 'export-results',
+  'mode-badge', 'notice', 'settings-fields', 'settings-note', 'template', 'template-count', 'interval', 'limit', 'mode', 'mode-help',
+  'roster-count', 'clear-selection', 'select-all', 'selection-count', 'roster-body', 'roster-empty',
+  'preview-status', 'preview-person', 'preview-recipient', 'preview-message', 'preview-reason', 'preview-summary',
+  'preview-button', 'consent-label', 'send-consent', 'start-button', 'launch-help', 'queue-status', 'queue-context',
+  'pause-button', 'stop-button', 'resume-button', 'finish-button', 'progress-fill', 'progress-summary',
+  'queue-reason', 'queue-guidance', 'queue-items', 'deny-count', 'deny-empty', 'deny-items',
+].map(id => [id, $(id)]));
+
+const available = typeof chrome !== 'undefined' && typeof chrome.runtime?.sendMessage === 'function';
+const statusNames = {
+  running: '正在处理', pausing: '正在安全暂停', paused: '已暂停', stopping: '正在安全停止', stopped: '已停止', completed: '已结束',
+  pending: '等待处理', preparing: '正在打开对话', prepared: '消息准备就绪', sending: '正在处理消息', sent: '已发送',
+  rehearsed: '已演练', skipped: '已跳过', failed: '失败', uncertain: '等待人工核对',
+};
+let state = { task: null, history: {}, denied: {} };
+let workspace = null;
+let selected = new Set();
+let preview = null;
+let previewToken = null;
+let previewFingerprint = null;
+let focusedId = null;
+let busy = false;
+let polling = false;
+let needsRefresh = false;
+let hydratedTaskId = null;
+let workspaceRevision = null;
+let deniedRevision = null;
+let lastKnownShopId = null;
+let requestSequence = 0;
+let latestApplied = 0;
+const rosterRows = new Map();
+const queueRows = new Map();
+const denyRows = new Map();
+
+function text(node, value) {
+  const next = String(value ?? '');
+  if (node.textContent !== next) node.textContent = next;
+}
+function showNotice(message, kind = '') {
+  text(ui.notice, message);
+  ui.notice.className = `notice${kind ? ` ${kind}` : ''}`;
+  ui.notice.hidden = !message;
+}
+function create(tag, className, content) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (content !== undefined) text(node, content);
+  return node;
+}
+function own(object, key) {
+  return object && Object.hasOwn(object, key) ? object[key] : undefined;
+}
+function shop() { return workspace?.shop || null; }
+function deniedForShop() { return own(state.denied, shop()?.id) || {}; }
+function isDenied(id) { return Boolean(own(deniedForShop(), id)); }
+function taskOpen() { return Boolean(state.task && state.task.status !== 'completed'); }
+function hasActiveItem() { return (state.task?.items || []).some(item => ['preparing', 'prepared', 'sending'].includes(item.status)); }
+function connected() { return Boolean(workspace?.shop?.id && workspace?.pageId && !workspace.error); }
+function editable() { return available && !busy && !taskOpen(); }
+function creatorList() {
+  const seen = new Set();
+  return (workspace?.creators || []).filter(creator => creator?.id && !seen.has(creator.id) && seen.add(creator.id));
+}
+function invalidatePreview() {
+  preview = null;
+  previewToken = null;
+  previewFingerprint = null;
+  ui['send-consent'].checked = false;
+}
+function getConfig() {
+  if (!connected()) throw new Error('请打开专用页面并读取当前店铺名单。');
+  if (needsRefresh) throw new Error('店铺已变化，请重新读取当前页名单。');
+  const creators = creatorList().filter(creator => selected.has(creator.id)).map(({ id, name }) => ({ id, name }));
+  if (!creators.length) throw new Error('请至少勾选一位达人。');
+  if (creators.length > 200) throw new Error('单次名单最多 200 人，请减少选择。');
+  const template = ui.template.value;
+  if (!template.trim()) throw new Error('请先填写消息模板。');
+  if (template.length > 2000) throw new Error('消息模板最多 2000 字。');
+  const remainder = template.replace(/\{\{name\}\}/g, '');
+  if (remainder.includes('{{') || remainder.includes('}}')) throw new Error('模板只支持 {{name}}，请检查其他变量或未闭合的括号。');
+  const intervalSeconds = Number(ui.interval.value);
+  const limit = Number(ui.limit.value);
+  if (!ui.interval.value.trim() || !Number.isFinite(intervalSeconds) || intervalSeconds <= 0) throw new Error('请填写大于 0 的逐人间隔。');
+  if (!ui.limit.value.trim() || !Number.isInteger(limit) || limit <= 0) throw new Error('请填写大于 0 的整数作为本次上限。');
+  return { shop: { id: shop().id, name: shop().name }, creators, template, intervalSeconds, limit, mode: ui.mode.value };
+}
+function currentFingerprint() {
+  try { return JSON.stringify(getConfig()); } catch { return null; }
+}
+function hydrateTask() {
+  const task = state.task;
+  if (!taskOpen() || task.id === hydratedTaskId) return;
+  hydratedTaskId = task.id;
+  const config = task.config;
+  ui.template.value = config.template;
+  ui.interval.value = String(config.intervalSeconds);
+  ui.limit.value = String(config.limit);
+  ui.mode.value = config.mode;
+  selected = new Set(config.shop.id === shop()?.id ? config.creators.map(creator => creator.id) : []);
+  invalidatePreview();
+}
+function applyReply(reply, sequence) {
+  if (sequence < latestApplied) return;
+  latestApplied = sequence;
+  if (Object.hasOwn(reply, 'workspace')) {
+    const next = reply.workspace;
+    const nextShopId = next?.shop?.id;
+    const identityChanged = lastKnownShopId && nextShopId && lastKnownShopId !== nextShopId;
+    const revision = JSON.stringify({ tabId: next?.tabId, pageId: next?.pageId, shop: next?.shop, creators: next?.creators, error: next?.error });
+    if (workspaceRevision !== null && workspaceRevision !== revision) invalidatePreview();
+    if (identityChanged) {
+      selected.clear();
+      focusedId = null;
+      needsRefresh = true;
+      showNotice('检测到店铺已切换。已清空名单选择和发送确认，请重新读取当前页名单并核对店铺。');
+    }
+    workspaceRevision = revision;
+    workspace = next;
+    if (nextShopId) lastKnownShopId = nextShopId;
+    const present = new Set(creatorList().map(creator => creator.id));
+    if (!taskOpen()) for (const id of selected) if (!present.has(id)) selected.delete(id);
+  }
+  if (reply.state) {
+    const revision = JSON.stringify(reply.state.denied || {});
+    if (deniedRevision !== null && deniedRevision !== revision) invalidatePreview();
+    deniedRevision = revision;
+    state = reply.state;
+    hydrateTask();
+  }
+}
+async function request(type, payload = {}) {
+  if (!available) throw new Error('请从 Chrome 扩展打开工作台');
+  const sequence = ++requestSequence;
+  const reply = await chrome.runtime.sendMessage({ type, ...payload });
+  if (!reply || reply.ok !== true) {
+    if (reply && typeof reply === 'object') applyReply(reply, sequence);
+    throw new Error(reply?.error || '后台未返回有效结果，请检查扩展连接。');
+  }
+  applyReply(reply, sequence);
+  return reply;
+}
+async function action(operation) {
+  if (busy || !available) return;
+  busy = true;
+  render();
+  try { await operation(); }
+  catch (error) { showNotice(error instanceof Error ? error.message : '操作失败，请检查页面连接。', 'error'); }
+  finally { busy = false; render(); }
+}
+function setTag(node, label, mood = '') {
+  text(node, label);
+  const className = `state-tag${mood ? ` ${mood}` : ''}`;
+  if (node.className !== className) node.className = className;
+}
+function statusMood(status) {
+  return ['sent', 'rehearsed'].includes(status) ? 'good' : ['uncertain', 'failed'].includes(status) ? 'bad' : status === 'skipped' ? 'warn' : '';
+}
+function reconcile(container, rows, entries, makeRow, updateRow) {
+  const keys = new Set(entries.map(entry => entry.id));
+  for (const [id, row] of rows) if (!keys.has(id)) { row.node.remove(); rows.delete(id); }
+  let cursor = container.firstElementChild;
+  for (const entry of entries) {
+    let row = rows.get(entry.id);
+    if (!row) { row = makeRow(entry); rows.set(entry.id, row); }
+    updateRow(row, entry);
+    if (row.node !== cursor) container.insertBefore(row.node, cursor);
+    cursor = row.node.nextElementSibling;
+  }
+}
+function denyCreator(creator, blocked) {
+  if (!editable() || !shop()) return;
+  const currentShop = { ...shop() };
+  void action(async () => {
+    invalidatePreview();
+    await request('panel:deny', { shopId: currentShop.id, creatorId: creator.id, name: creator.name, blocked });
+    showNotice(blocked ? `已将 ${creator.name} 加入本店铺拒绝名单。请重新生成预览。` : `已解除 ${creator.name} 的拒绝记录，历史防重发记录继续保留。`, 'success');
+  });
+}
+function makeRosterRow(creator) {
+  const node = create('tr');
+  const checkboxCell = create('td');
+  const checkbox = create('input');
+  checkbox.type = 'checkbox';
+  checkbox.addEventListener('change', () => {
+    if (!editable()) { render(); return; }
+    if (checkbox.checked && selected.size >= 200) { checkbox.checked = false; showNotice('最多选择 200 位达人。', 'error'); return; }
+    if (checkbox.checked) selected.add(creator.id); else selected.delete(creator.id);
+    invalidatePreview();
+    render();
+  });
+  checkboxCell.append(checkbox);
+  const identityCell = create('td');
+  const name = create('button', 'creator-name');
+  name.type = 'button';
+  name.addEventListener('click', () => {
+    focusedId = creator.id;
+    renderPreview();
+  });
+  const username = create('span', 'creator-username');
+  identityCell.append(name, username);
+  const stateCell = create('td');
+  const tag = create('span', 'state-tag');
+  stateCell.append(tag);
+  const actionCell = create('td');
+  const deny = create('button', 'text-button');
+  deny.type = 'button';
+  deny.addEventListener('click', () => {
+    const current = creatorList().find(item => item.id === creator.id);
+    if (current) denyCreator(current, !isDenied(current.id));
+  });
+  actionCell.append(deny);
+  node.append(checkboxCell, identityCell, stateCell, actionCell);
+  return { node, checkbox, name, username, tag, deny };
+}
+function renderRoster() {
+  const creators = creatorList();
+  const taskItems = new Map((state.task?.items || []).map(item => [item.id, item]));
+  const history = own(state.history, shop()?.id) || {};
+  reconcile(ui['roster-body'], rosterRows, creators, makeRosterRow, (row, creator) => {
+    const blocked = isDenied(creator.id);
+    row.checkbox.checked = selected.has(creator.id);
+    row.checkbox.disabled = !editable() || needsRefresh || blocked || creator.chatAvailable === false;
+    row.checkbox.setAttribute('aria-label', `选择 ${creator.name}`);
+    row.node.classList.toggle('selected', selected.has(creator.id));
+    text(row.name, creator.name || '未命名达人');
+    text(row.username, creator.username ? `@${creator.username.replace(/^@/, '')}` : '');
+    let status = '可建联';
+    let mood = '';
+    if (blocked) { status = '拒绝名单'; mood = 'warn'; }
+    else if (own(history, creator.id)) { status = '已有防重发记录'; mood = 'warn'; }
+    else if (creator.chatAvailable === false) { status = '暂无聊天入口'; mood = 'warn'; }
+    else if (taskItems.has(creator.id)) { const item = taskItems.get(creator.id); status = statusNames[item.status] || '待检查'; mood = statusMood(item.status); }
+    setTag(row.tag, status, mood);
+    text(row.deny, blocked ? '解除拒绝' : '加入拒绝');
+    row.deny.disabled = !editable() || !connected() || needsRefresh;
+  });
+  text(ui['roster-count'], creators.length);
+  text(ui['selection-count'], `已选 ${selected.size} 人`);
+  const eligible = creators.filter(creator => !isDenied(creator.id) && creator.chatAvailable !== false);
+  const checked = eligible.filter(creator => selected.has(creator.id)).length;
+  ui['select-all'].checked = eligible.length > 0 && checked === eligible.length;
+  ui['select-all'].indeterminate = checked > 0 && checked < eligible.length;
+  ui['select-all'].disabled = !editable() || !connected() || needsRefresh || !eligible.length;
+  ui['clear-selection'].disabled = !editable() || !selected.size;
+  ui['roster-empty'].hidden = creators.length > 0;
+}
+function previewItems() { return taskOpen() ? state.task.items : preview?.items || []; }
+function renderPreview() {
+  const items = previewItems();
+  const selection = ui['preview-person'];
+  if (!items.some(item => item.id === focusedId)) focusedId = items[0]?.id || null;
+  // Only replace changed options; polling must not interrupt keyboard navigation.
+  const wanted = items.length ? items.map(item => ({ value: item.id, label: `${item.name}${item.status === 'skipped' ? ' · 跳过' : ''}` })) : [{ value: '', label: '生成预览后可逐人切换' }];
+  const signature = JSON.stringify(wanted);
+  if (selection.dataset.options !== signature) {
+    selection.replaceChildren(...wanted.map(item => { const option = create('option', '', item.label); option.value = item.value; return option; }));
+    selection.dataset.options = signature;
+  }
+  if (selection.value !== (focusedId || '')) selection.value = focusedId || '';
+  selection.disabled = !items.length;
+  const current = items.find(item => item.id === focusedId);
+  text(ui['preview-recipient'], current ? `发给 ${current.name}` : '等待选择达人');
+  text(ui['preview-message'], current?.text || '填写模板、间隔和上限，勾选名单后生成预览。每位达人的完整消息会显示在这里。');
+  text(ui['preview-reason'], current?.reason ? `处理说明：${current.reason}` : '');
+  text(ui['preview-status'], taskOpen() ? '当前任务消息' : previewToken ? '预览已生成' : '尚未预览');
+  text(ui['preview-summary'], taskOpen() ? '当前任务的名单与消息已固定。结束本任务后可修改。' : preview ? `本次可处理 ${preview.sendableCount} 人，将跳过 ${preview.skippedCount} 人。请逐人切换核对消息。` : '每次修改配置或名单后，都需要重新预览。');
+}
+function makeQueueRow(item) {
+  const node = create('li', 'queue-item');
+  const name = create('strong');
+  const tag = create('span', 'state-tag');
+  const reason = create('p', 'item-reason');
+  const actions = create('div', 'resolve-actions');
+  const confirm = create('button', 'button button-outline');
+  const skip = create('button', 'button button-outline', '跳过并保留防重发记录');
+  for (const [button, resolution] of [[confirm, 'sent'], [skip, 'skip']]) {
+    button.type = 'button';
+    button.addEventListener('click', () => void action(async () => {
+      await request('panel:resolve', { itemId: item.id, resolution });
+      showNotice('已记录人工核对结果。', 'success');
+    }));
+  }
+  actions.append(confirm, skip);
+  node.append(name, tag, reason, actions);
+  return { node, name, tag, reason, actions, confirm, skip };
+}
+function renderQueue() {
+  const task = state.task;
+  const items = task?.items || [];
+  const active = items.find(item => ['preparing', 'prepared', 'sending'].includes(item.status));
+  const totals = { sent: 0, rehearsed: 0, skipped: 0, failed: 0, uncertain: 0, pending: 0 };
+  for (const item of items) if (Object.hasOwn(totals, item.status)) totals[item.status]++;
+  const finished = totals.sent + totals.rehearsed + totals.skipped + totals.failed;
+  const percent = items.length ? Math.round(finished / items.length * 100) : 0;
+  ui['progress-fill'].style.width = `${percent}%`;
+  text(ui['queue-status'], statusNames[task?.status] || '尚未开始');
+  const mode = task?.config?.mode === 'send' ? '真实发送' : '演练';
+  text(ui['queue-context'], task ? `${task.config.shop.name} · ${mode}${active ? ` · 当前：${active.name}` : task.status === 'running' ? ' · 等待下一位达人' : ''}` : '启动任务后，这里显示当前处理项和核对入口。');
+  text(ui['progress-summary'], task ? `已处理 ${finished} / ${items.length} 人 · 已发送 ${totals.sent} · 已演练 ${totals.rehearsed} · 跳过 ${totals.skipped} · 失败 ${totals.failed} · 待核对 ${totals.uncertain}` : '尚无任务');
+  text(ui['queue-reason'], task?.reason || '');
+  ui['queue-reason'].hidden = !task?.reason;
+  let guidance = '';
+  if (totals.uncertain) guidance = '请先在专用 Shopee 页核对下列结果。核对完成前，不能继续或结束本任务。';
+  else if (['paused', 'stopped'].includes(task?.status)) guidance = `${totals.failed ? '继续时将跳过失败项，不会自动重试。' : ''}当前任务尚未结束；继续处理剩余名单，或结束本任务后创建新任务。`;
+  else if (['pausing', 'stopping'].includes(task?.status)) guidance = '正在等待当前操作返回结果，请勿关闭专用页面；界面会自动更新。';
+  else if (task?.status === 'completed') guidance = '本任务已结束，可调整设置和名单，再生成新预览。';
+  text(ui['queue-guidance'], guidance);
+  ui['queue-guidance'].hidden = !guidance;
+  const actionable = ['paused', 'stopped'].includes(task?.status);
+  ui['pause-button'].hidden = task?.status !== 'running';
+  ui['stop-button'].hidden = !['running', 'pausing'].includes(task?.status);
+  ui['resume-button'].hidden = !actionable;
+  ui['finish-button'].hidden = !actionable;
+  ui['pause-button'].disabled = !available || busy;
+  ui['stop-button'].disabled = !available || busy;
+  ui['resume-button'].disabled = !available || busy || totals.uncertain > 0 || hasActiveItem() || !connected() || shop()?.id !== task?.config?.shop?.id;
+  ui['finish-button'].disabled = !available || busy || totals.uncertain > 0 || hasActiveItem();
+  reconcile(ui['queue-items'], queueRows, items, makeQueueRow, (row, item) => {
+    text(row.name, item.name);
+    setTag(row.tag, statusNames[item.status] || '待检查', statusMood(item.status));
+    text(row.reason, item.reason || '');
+    row.reason.hidden = !item.reason;
+    row.actions.hidden = item.status !== 'uncertain';
+    text(row.confirm, task.config.mode === 'dry-run' ? '确认已演练' : '确认已发送');
+    row.confirm.disabled = !available || busy || !actionable;
+    row.skip.disabled = !available || busy || !actionable;
+  });
+}
+function renderDenied() {
+  const present = new Set(creatorList().map(creator => creator.id));
+  const entries = Object.entries(deniedForShop()).map(([id, record]) => ({ id, name: record?.name || id, present: present.has(id) }));
+  text(ui['deny-count'], entries.length);
+  ui['deny-empty'].hidden = entries.length > 0;
+  reconcile(ui['deny-items'], denyRows, entries, entry => {
+    const node = create('li');
+    const identity = create('span');
+    const name = create('span');
+    const hint = create('small');
+    identity.append(name, hint);
+    const button = create('button', 'text-button', '解除拒绝');
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      const record = own(deniedForShop(), entry.id);
+      if (record) denyCreator({ id: entry.id, name: record.name || entry.id }, false);
+    });
+    node.append(identity, button);
+    return { node, name, hint, button };
+  }, (row, entry) => {
+    text(row.name, entry.name);
+    text(row.hint, entry.present ? '当前页面' : '不在当前页面');
+    row.button.disabled = !editable() || !connected() || needsRefresh;
+  });
+}
+function render() {
+  const locked = taskOpen();
+  const isSend = ui.mode.value === 'send';
+  text(ui['connection-state'], !available ? '未连接扩展' : connected() ? '专用页面已连接' : workspace?.error ? '页面需要处理' : '等待专用页面');
+  ui['connection-dot'].classList.toggle('connected', available && connected());
+  text(ui['shop-name'], shop()?.name || '尚未读取店铺');
+  text(ui['connection-detail'], workspace?.error || (needsRefresh ? '账号已变化，请重新读取名单。' : connected() ? '请确认这是本次要使用的店铺。' : '打开专用页面，登录后读取当前店铺与名单。'));
+  ui['open-page'].disabled = !available || busy;
+  ui['refresh-list'].disabled = !editable();
+  ui['export-results'].disabled = !available || busy || (!state.task && !Object.keys(state.denied || {}).length);
+  ui['settings-fields'].disabled = !editable();
+  text(ui['settings-note'], locked ? '本任务设置已固定，结束后可修改' : '默认演练，不会点击发送');
+  text(ui['template-count'], `${ui.template.value.length} / 2000`);
+  text(ui['mode-badge'], isSend ? '真实发送模式' : '演练模式');
+  ui['mode-badge'].classList.toggle('send-mode', isSend);
+  text(ui['mode-help'], isSend ? '启动后将自动逐人发送。先核对店铺、名单与每位达人的消息；间隔不代表平台安全保证。' : '演练不会点击发送，也不会产生真实已发送记录；间隔需自行设定。');
+  ui['consent-label'].hidden = !isSend || locked;
+  ui['send-consent'].disabled = !editable() || !previewToken;
+  const validPreview = Boolean(previewToken && previewFingerprint === currentFingerprint() && preview?.sendableCount > 0);
+  ui['preview-button'].disabled = !editable() || !connected() || needsRefresh;
+  text(ui['start-button'], isSend ? '启动真实发送队列' : '启动演练队列');
+  ui['start-button'].disabled = !editable() || !validPreview || (isSend && !ui['send-consent'].checked);
+  text(ui['launch-help'], locked ? '当前任务结束后才能建立新任务。' : needsRefresh ? '店铺已变化，请先重新读取名单。' : validPreview ? isSend && !ui['send-consent'].checked ? '核对逐人消息并勾选确认后，可启动真实发送。' : '预览已就绪，启动后按本次配置逐人处理。' : '先生成预览，再启动本次任务。');
+  renderRoster();
+  renderPreview();
+  renderQueue();
+  renderDenied();
+}
+
+for (const field of [ui.template, ui.interval, ui.limit, ui.mode]) {
+  field.addEventListener('input', () => { invalidatePreview(); render(); });
+  field.addEventListener('change', () => { invalidatePreview(); render(); });
+}
+ui['send-consent'].addEventListener('change', render);
+ui['preview-person'].addEventListener('change', () => { focusedId = ui['preview-person'].value; renderPreview(); });
+ui['select-all'].addEventListener('change', () => {
+  if (!editable() || needsRefresh) return;
+  const eligible = creatorList().filter(creator => !isDenied(creator.id) && creator.chatAvailable !== false);
+  if (ui['select-all'].checked) {
+    for (const creator of eligible) { if (selected.size >= 200) break; selected.add(creator.id); }
+    if (eligible.length > 200) showNotice('本次已选择前 200 位可建联达人。');
+  } else for (const creator of eligible) selected.delete(creator.id);
+  invalidatePreview();
+  render();
+});
+ui['clear-selection'].addEventListener('click', () => {
+  if (!editable()) return;
+  selected.clear(); invalidatePreview(); render();
+});
+ui['open-page'].addEventListener('click', () => void action(async () => {
+  invalidatePreview();
+  await request('panel:open');
+  showNotice('已打开专用 Shopee 页。请在页面就绪、登录并筛选达人后，点击“读取当前页名单”。');
+}));
+ui['refresh-list'].addEventListener('click', () => void action(async () => {
+  if (taskOpen()) throw new Error('请先结束当前任务，再重新读取名单。');
+  invalidatePreview();
+  await request('panel:refresh');
+  if (!connected()) throw new Error(workspace?.error || '专用页面尚未就绪，请等待页面加载并确认已登录。');
+  needsRefresh = false;
+  showNotice(`已读取 ${shop().name} 的 ${creatorList().length} 位达人。请勾选名单并核对店铺。`, 'success');
+}));
+ui['preview-button'].addEventListener('click', () => void action(async () => {
+  if (taskOpen()) throw new Error('请先结束当前任务，再生成新预览。');
+  const config = getConfig();
+  const fingerprint = JSON.stringify(config);
+  invalidatePreview();
+  const reply = await request('panel:preview', { config });
+  if (fingerprint !== currentFingerprint()) throw new Error('店铺、名单或配置已变化，请重新读取并生成预览。');
+  if (!reply.preview || !reply.previewToken) throw new Error('预览尚未生成，请检查连接后重试。');
+  preview = reply.preview;
+  previewToken = reply.previewToken;
+  previewFingerprint = fingerprint;
+  showNotice(preview.sendableCount ? '逐人预览已生成。请切换达人，核对完整消息和跳过原因。' : '本次没有可处理的达人，请查看跳过原因并调整名单。', preview.sendableCount ? 'success' : '');
+}));
+ui['start-button'].addEventListener('click', () => void action(async () => {
+  const config = getConfig();
+  if (taskOpen()) throw new Error('请先结束当前任务。');
+  if (!previewToken || previewFingerprint !== JSON.stringify(config)) throw new Error('配置已变化，请重新生成预览。');
+  if (config.mode === 'send' && !ui['send-consent'].checked) throw new Error('请先核对并勾选本次自动发送确认。');
+  await request('panel:start', { config, previewToken, confirmed: config.mode === 'send' && ui['send-consent'].checked });
+  invalidatePreview();
+  showNotice(config.mode === 'send' ? '真实发送队列已启动，请保持专用页面打开并关注处理结果。' : '演练队列已启动，不会点击发送。', 'success');
+}));
+for (const [id, type, message] of [
+  ['pause-button', 'panel:pause', '已请求暂停，等待当前操作安全结束。'],
+  ['stop-button', 'panel:stop', '已请求停止，剩余名单将保留在当前任务中。'],
+  ['resume-button', 'panel:resume', '已继续本任务；失败项会跳过，不会自动重试。'],
+  ['finish-button', 'panel:finish', '本任务已结束，剩余项记为跳过，历史记录已保留。'],
+]) ui[id].addEventListener('click', () => void action(async () => {
+  await request(type);
+  invalidatePreview();
+  showNotice(message, 'success');
+}));
+ui['export-results'].addEventListener('click', () => {
+  if (!available || busy) return;
+  const content = { exportedAt: new Date().toISOString(), task: state.task, denied: state.denied || {} };
+  const blob = new Blob([JSON.stringify(content, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `虾秘-任务与拒绝名单-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showNotice('已导出本地任务与拒绝名单，演练结果与真实发送结果分别保留。', 'success');
+});
+async function poll() {
+  if (!available || busy || polling) return;
+  polling = true;
+  try { await request('panel:get'); }
+  catch (error) { showNotice(error instanceof Error ? error.message : '无法读取后台状态。', 'error'); }
+  finally { polling = false; render(); }
+}
+render();
+if (available) {
+  void poll();
+  const timer = setInterval(() => void poll(), 1500);
+  window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
+} else showNotice('请从 Chrome 扩展打开工作台', 'error');
+FILE: extension\dashboard.html
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>虾秘 · 印尼达人建联</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <script type="module" src="dashboard.mjs"></script>
+</head>
+<body>
+  <aside class="sidebar" aria-label="连接与工具">
+    <a class="brand" href="#main"><span class="brand-mark" aria-hidden="true">虾</span><span>虾秘<small>独立自用版</small></span></a>
+    <div class="sidebar-rule"></div>
+    <div class="connection-heading"><span id="connection-dot" class="connection-dot"></span><span id="connection-state">正在连接扩展</span></div>
+    <h2 class="sidebar-label">当前店铺</h2>
+    <p id="shop-name" class="shop-name">尚未读取</p>
+    <p id="connection-detail" class="sidebar-help">使用专用页面读取当前账号和达人名单。</p>
+    <button id="open-page" class="button sidebar-button" type="button">打开专用 Shopee 页</button>
+    <button id="refresh-list" class="button sidebar-button secondary" type="button">读取当前页名单</button>
+    <p class="sidebar-help">先在专用页面筛选达人，再回到这里读取。每次切换账号后，请重新读取并核对店铺。</p>
+    <div class="sidebar-bottom"><span class="local-label">数据保存在本机</span><button id="export-results" class="button sidebar-button secondary" type="button">导出任务与拒绝名单</button><p class="sidebar-help">演练与真实发送分别记录；导出文件请妥善保管。</p></div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="page-header"><div><h1>印尼达人建联</h1><p>选好名单，逐人核对，再启动队列。</p></div><span id="mode-badge" class="mode-badge">演练模式</span></header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section class="settings" aria-labelledby="settings-heading">
+      <div class="section-heading"><h2 id="settings-heading">任务设置</h2><span id="settings-note" class="muted">默认演练，不会点击发送</span></div>
+      <fieldset id="settings-fields">
+        <div class="settings-grid">
+          <div class="template-field"><label for="template">消息模板 <span class="optional">仅支持 {{name}}，替换为达人姓名</span></label><textarea id="template" maxlength="2000" rows="4" placeholder="输入要发送的消息，可使用 {{name}} 称呼达人。"></textarea><div class="field-foot"><span>在右侧查看每位达人的完整消息</span><span id="template-count">0 / 2000</span></div></div>
+          <div class="config-fields"><div class="number-fields"><div><label for="interval">逐人间隔（秒）</label><input id="interval" type="number" min="0" step="any" placeholder="例如 30" inputmode="decimal"></div><div><label for="limit">本次处理上限</label><input id="limit" type="number" min="1" max="200" step="1" placeholder="例如 10" inputmode="numeric"></div></div><label for="mode">操作模式</label><select id="mode"><option value="dry-run">演练 · 检查流程，不点击发送</option><option value="send">真实发送 · 自动逐人发送消息</option></select><p id="mode-help" class="field-help">演练不会产生真实已发送记录；间隔需自行设定，不代表平台安全保证。</p></div>
+        </div>
+      </fieldset>
+    </section>
+    <section class="workbench" aria-label="名单与消息核对">
+      <div class="roster-pane"><div class="section-heading roster-heading"><div><h2>达人名单 <span id="roster-count" class="count">0</span></h2><p class="muted">只处理你明确勾选的达人，最多 200 人。</p></div><button id="clear-selection" class="text-button" type="button">清空选择</button></div><div class="roster-tools"><label class="check-label"><input id="select-all" type="checkbox">选择当前可建联达人</label><span id="selection-count">已选 0 人</span></div><div class="table-scroll"><table><caption class="sr-only">当前页面读取到的达人</caption><thead><tr><th class="checkbox-column"><span class="sr-only">选择</span></th><th scope="col">达人</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead><tbody id="roster-body"></tbody></table><div id="roster-empty" class="empty-state"><span class="empty-symbol" aria-hidden="true">＋</span><h3>从当前账号读取名单</h3><p>打开左侧专用 Shopee 页，筛选达人后点击“读取当前页名单”。读取不会自动选中任何人。</p></div></div></div>
+      <aside class="preview-pane" aria-labelledby="preview-heading"><div class="section-heading"><h2 id="preview-heading">逐人消息预览</h2><span id="preview-status" class="mini-tag">尚未预览</span></div><label for="preview-person" class="sr-only">切换预览达人</label><select id="preview-person" disabled><option>生成预览后可逐人切换</option></select><div class="message-card"><div class="message-recipient" id="preview-recipient">等待选择达人</div><p id="preview-message" class="message-text">填写模板、间隔和上限，勾选名单后生成预览。每位达人的完整消息会显示在这里。</p></div><p id="preview-reason" class="field-help"></p><p id="preview-summary" class="preview-summary">每次修改配置或名单后，都需要重新预览。</p><div class="launch-area"><button id="preview-button" class="button button-outline" type="button">生成逐人预览</button><label id="consent-label" class="consent" hidden><input id="send-consent" type="checkbox"><span>已核对店铺、名单和逐人消息，同意本次自动发送</span></label><button id="start-button" class="button button-primary" type="button" disabled>启动演练队列</button><p id="launch-help" class="field-help">先生成预览，再启动本次任务。</p></div></aside>
+    </section>
+    <section class="queue-section" aria-labelledby="queue-heading"><div class="section-heading"><div><h2 id="queue-heading">队列进度 <span id="queue-status" class="mini-tag">尚未开始</span></h2><p id="queue-context" class="muted">启动任务后，这里显示当前处理项和核对入口。</p></div><div class="queue-controls"><button id="pause-button" class="button button-outline" type="button" hidden>暂停队列</button><button id="stop-button" class="button button-outline" type="button" hidden>停止队列</button><button id="resume-button" class="button button-primary" type="button" hidden>继续本任务</button><button id="finish-button" class="button button-outline" type="button" hidden>结束本任务</button></div></div><div class="progress-track"><div id="progress-fill"></div></div><p id="progress-summary" class="progress-summary">尚无任务</p><p id="queue-reason" class="queue-reason" hidden></p><p id="queue-guidance" class="field-help" hidden></p><ul id="queue-items" class="queue-items" aria-label="逐人处理结果"></ul></section>
+    <details class="deny-section"><summary>本店铺拒绝名单 <span id="deny-count" class="count">0</span></summary><p class="field-help">加入后会在后续任务中跳过；解除拒绝不会清除历史防重发记录。包含已不在当前页面的达人。</p><p id="deny-empty" class="muted">当前店铺没有拒绝记录。</p><ul id="deny-items" class="deny-items"></ul></details>
+    <footer>虾秘 · 印尼达人建联<span>独立自用工具，请在专用页面核对实际结果。</span></footer>
+  </main>
+</body>
+</html>
+FILE: extension\dashboard.css
+:root {
+  color-scheme:light;
+  --canvas:#f3f6fa;
+  --nav:#173453;
+  --ink:#18314b;
+  --muted:#637589;
+  --line:#dce4ee;
+  --orange:#e9492d;
+  --green:#217461;
+  --white:#fff;
+  --warning:#995d17;
+  font-family:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",sans-serif;
+  font-size:14px;
+  color:var(--ink);
+  background:var(--canvas)
+}
+* {
+  box-sizing:border-box
+}
+body {
+  margin:0;
+  display:grid;
+  grid-template-columns:238px minmax(0,1fr);
+  min-height:100vh
+}
+button,input,select,textarea {
+  font:inherit
+}
+button {
+  cursor:pointer
+}
+button:disabled,input:disabled,select:disabled,textarea:disabled {
+  cursor:not-allowed
+}
+button:disabled {
+  opacity:.46
+}
+a {
+  color:inherit
+}
+h1,h2,h3,p {
+  margin:0
+}
+h1 {
+  font-size:28px;
+  font-weight:700;
+  letter-spacing:.03em
+}
+h2 {
+  font-size:16px;
+  font-weight:700
+}
+h3 {
+  font-size:15px
+}
+button,select,input,textarea {
+  outline-offset:3px
+}
+:focus-visible {
+  outline:3px solid #317ab4;
+  outline-offset:3px
+}
+input[type=checkbox] {
+  width:16px;
+  height:16px;
+  margin:0;
+  accent-color:var(--orange);
+  flex-shrink:0
+}
+.sidebar {
+  position:sticky;
+  top:0;
+  height:100vh;
+  background:var(--nav);
+  color:#fff;
+  padding:30px 22px;
+  display:flex;
+  flex-direction:column;
+  align-items:stretch
+}
+.brand {
+  display:flex;
+  align-items:center;
+  gap:12px;
+  font-size:27px;
+  font-weight:700;
+  text-decoration:none;
+  width:fit-content
+}
+.brand-mark {
+  display:grid;
+  place-items:center;
+  width:44px;
+  height:44px;
+  border:1px solid #92a9bf;
+  border-radius:13px;
+  color:#fff;
+  font-size:24px;
+  transform:rotate(-7deg)
+}
+.brand small {
+  display:block;
+  font-size:11px;
+  color:#bdccdd;
+  font-weight:400;
+  margin-top:3px;
+  letter-spacing:2px
+}
+.sidebar-rule {
+  height:1px;
+  background:#37526c;
+  margin:29px 0 27px
+}
+.connection-heading {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  font-size:12px;
+  color:#dce9f6
+}
+.connection-dot {
+  height:7px;
+  width:7px;
+  border-radius:50%;
+  background:#9eacbb
+}
+.connection-dot.connected {
+  background:#6bd5ab
+}
+.sidebar-label {
+  margin-top:26px;
+  font-size:11px;
+  font-weight:400;
+  color:#afc0d1
+}
+.shop-name {
+  font-size:18px;
+  font-weight:600;
+  margin-top:8px;
+  word-break:break-word
+}
+.sidebar-help {
+  font-size:11px;
+  line-height:1.85;
+  color:#bdccdd;
+  margin:10px 0 16px
+}
+.button {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  min-height:39px;
+  padding:9px 15px;
+  border-radius:6px;
+  border:1px solid transparent;
+  font-weight:600;
+  font-size:12px;
+  line-height:1.5;
+  transition:background-color .12s
+}
+.sidebar-button {
+  width:100%;
+  background:#fff;
+  color:var(--nav);
+  margin-bottom:10px;
+  font-size:11px;
+  padding-inline:9px
+}
+.sidebar-button.secondary {
+  color:#edf4fc;
+  background:transparent;
+  border-color:#6c8196
+}
+.sidebar-button:hover:not(:disabled) {
+  background:#dce8f4
+}
+.sidebar-button.secondary:hover:not(:disabled) {
+  background:#294763
+}
+.sidebar-bottom {
+  margin-top:auto;
+  padding-top:38px
+}
+.local-label {
+  display:block;
+  font-size:11px;
+  color:#bdccdd;
+  margin-bottom:10px
+}
+main {
+  max-width:1510px;
+  width:100%;
+  padding:30px 34px 18px;
+  margin-inline:auto;
+  min-width:0
+}
+.page-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  margin-bottom:26px;
+  gap:16px
+}
+.page-header p {
+  font-size:12px;
+  color:var(--muted);
+  margin-top:8px
+}
+.mode-badge {
+  padding:8px 13px;
+  border:1px solid #b6d8cd;
+  background:#e9f4ef;
+  color:var(--green);
+  font-weight:600;
+  font-size:12px;
+  white-space:nowrap;
+  border-radius:20px
+}
+.mode-badge.send-mode {
+  background:#fff0e9;
+  border-color:#ebbaa4;
+  color:#9b4323
+}
+.notice {
+  background:#eef4fb;
+  border:1px solid #b8cde5;
+  border-left:3px solid #3873a8;
+  padding:12px 15px;
+  margin-bottom:18px;
+  font-size:12px;
+  line-height:1.8;
+  white-space:pre-line
+}
+.notice.error {
+  border-color:#e3b9b2;
+  border-left-color:var(--orange);
+  background:#fff1ed;
+  color:#913421
+}
+.notice.success {
+  border-color:#bdd6ca;
+  border-left-color:var(--green);
+  background:#edf7f2;
+  color:var(--green)
+}
+.section-heading {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:12px;
+  margin-bottom:18px
+}
+.muted {
+  font-size:12px;
+  line-height:1.7;
+  color:var(--muted)
+}
+.settings {
+  background:var(--white);
+  border:1px solid var(--line);
+  padding:22px 24px;
+  margin-bottom:22px;
+  border-radius:9px
+}
+fieldset {
+  border:0;
+  margin:0;
+  padding:0;
+  min-width:0
+}
+.settings-grid {
+  display:grid;
+  grid-template-columns:minmax(0,1.35fr) minmax(290px,1fr);
+  gap:28px
+}
+.settings label,.config-fields>label {
+  display:block;
+  font-size:12px;
+  font-weight:600;
+  margin-bottom:9px
+}
+.optional {
+  font-weight:400;
+  font-size:11px;
+  color:var(--muted);
+  margin-left:8px
+}
+textarea,input[type=number],select {
+  width:100%;
+  border:1px solid #bac9d9;
+  border-radius:5px;
+  color:var(--ink);
+  background:#fff;
+  padding:10px 11px;
+  line-height:1.5
+}
+textarea {
+  resize:vertical;
+  min-height:120px;
+  font-size:12px
+}
+input[type=number] {
+  min-height:39px
+}
+input:disabled,textarea:disabled,select:disabled {
+  background:#f1f4f7;
+  color:#617389
+}
+::placeholder {
+  color:#7b8997;
+  opacity:1
+}
+.number-fields {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:14px;
+  margin-bottom:17px
+}
+.field-foot {
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:7px;
+  color:var(--muted);
+  font-size:10px
+}
+.field-help {
+  font-size:11px;
+  line-height:1.8;
+  color:var(--muted);
+  margin-top:10px
+}
+.workbench {
+  display:grid;
+  grid-template-columns:minmax(0,1.65fr) minmax(290px,1fr);
+  background:var(--white);
+  border:1px solid var(--line);
+  border-radius:9px;
+  overflow:hidden;
+  margin-bottom:22px
+}
+.roster-pane {
+  min-width:0
+}
+.roster-heading {
+  padding:23px 23px 0;
+  margin-bottom:16px
+}
+.roster-heading h2 {
+  margin-bottom:6px
+}
+.count {
+  font-family:"Segoe UI",sans-serif;
+  font-weight:600;
+  color:#6c8096;
+  font-size:12px;
+  display:inline-block;
+  margin-left:7px
+}
+.text-button {
+  padding:5px;
+  border:0;
+  background:none;
+  color:#486f98;
+  font-size:11px;
+  white-space:nowrap
+}
+.text-button:hover:not(:disabled) {
+  text-decoration:underline
+}
+.roster-tools {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:12px 23px;
+  background:#f7f9fc;
+  border-block:1px solid var(--line);
+  font-size:11px;
+  color:var(--muted);
+  gap:10px
+}
+.check-label {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  font-size:11px
+}
+.table-scroll {
+  max-height:456px;
+  min-height:307px;
+  overflow:auto
+}
+table {
+  width:100%;
+  border-collapse:collapse;
+  text-align:left;
+  table-layout:fixed
+}
+th {
+  position:sticky;
+  top:0;
+  z-index:1;
+  background:#fff;
+  padding:13px 10px;
+  color:var(--muted);
+  font-size:10px;
+  font-weight:400;
+  border-bottom:1px solid var(--line)
+}
+th:nth-child(2) {
+  width:44%
+}
+th:nth-child(3) {
+  width:23%
+}
+th:last-child {
+  width:23%
+}
+.checkbox-column {
+  width:39px
+}
+td {
+  padding:13px 10px;
+  border-bottom:1px solid #eaf0f5;
+  vertical-align:middle;
+  font-size:11px;
+  overflow-wrap:anywhere
+}
+td:first-child,th:first-child {
+  padding-left:22px
+}
+tr.selected {
+  background:#f0f6fc
+}
+.creator-name {
+  border:0;
+  background:none;
+  color:var(--ink);
+  padding:0;
+  font-size:12px;
+  font-weight:600;
+  text-align:left
+}
+.creator-name:hover {
+  text-decoration:underline
+}
+.creator-username {
+  display:block;
+  color:var(--muted);
+  font-size:10px;
+  margin-top:4px
+}
+.state-tag {
+  display:inline-block;
+  padding:4px 7px;
+  border-radius:4px;
+  background:#edf3f8;
+  font-size:10px;
+  color:#58738e;
+  line-height:1.5
+}
+.state-tag.good {
+  color:var(--green);
+  background:#e9f5ee
+}
+.state-tag.warn {
+  color:var(--warning);
+  background:#fff2dd
+}
+.state-tag.bad {
+  color:#a03c31;
+  background:#fff0ed
+}
+.empty-state {
+  text-align:center;
+  padding:37px 28px;
+  color:var(--muted);
+  max-width:390px;
+  margin:auto
+}
+.empty-symbol {
+  display:grid;
+  place-items:center;
+  width:37px;
+  height:37px;
+  color:#7e94aa;
+  border:1px dashed #9eb2c6;
+  border-radius:9px;
+  font-size:22px;
+  margin:0 auto 13px
+}
+.empty-state h3 {
+  color:var(--ink);
+  font-weight:600;
+  margin-bottom:9px
+}
+.empty-state p {
+  font-size:11px;
+  line-height:1.9
+}
+.preview-pane {
+  border-left:1px solid var(--line);
+  background:#fbfcfe;
+  padding:23px;
+  min-width:0
+}
+.mini-tag {
+  font-size:10px;
+  padding:4px 7px;
+  border-radius:4px;
+  background:#edf2f7;
+  color:#5a7189;
+  white-space:nowrap
+}
+.message-card {
+  margin-top:18px;
+  background:#fff;
+  border:1px solid var(--line);
+  border-radius:7px;
+  overflow:hidden
+}
+.message-recipient {
+  padding:12px 15px;
+  color:#5a7189;
+  border-bottom:1px solid #ebeff5;
+  font-size:11px
+}
+.message-text {
+  font-size:12px;
+  line-height:1.95;
+  padding:17px 15px;
+  min-height:122px;
+  max-height:280px;
+  overflow:auto;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+.preview-summary {
+  font-size:11px;
+  color:var(--muted);
+  line-height:1.8;
+  margin-top:15px
+}
+.launch-area {
+  border-top:1px solid var(--line);
+  padding-top:17px;
+  margin-top:18px;
+  display:flex;
+  flex-direction:column;
+  gap:10px
+}
+.button-primary {
+  background:var(--orange);
+  color:#fff;
+  border-color:var(--orange)
+}
+.button-primary:hover:not(:disabled) {
+  background:#c93720;
+  border-color:#c93720
+}
+.button-outline {
+  color:var(--ink);
+  border-color:#b6c5d6;
+  background:#fff
+}
+.button-outline:hover:not(:disabled) {
+  background:#eef4fb
+}
+.consent {
+  display:flex;
+  align-items:flex-start;
+  gap:9px;
+  font-size:11px;
+  line-height:1.8;
+  color:#95432b;
+  padding:7px 0
+}
+.consent input {
+  margin-top:3px
+}
+.launch-area .field-help {
+  margin-top:0
+}
+.queue-section {
+  border:1px solid var(--line);
+  background:#fff;
+  padding:23px 24px;
+  border-radius:9px;
+  margin-bottom:18px
+}
+.queue-section h2 .mini-tag {
+  margin-left:8px;
+  font-weight:400
+}
+.queue-section .muted {
+  margin-top:7px
+}
+.queue-controls {
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  justify-content:flex-end
+}
+.progress-track {
+  height:5px;
+  background:#e7edf4;
+  overflow:hidden;
+  border-radius:3px
+}
+.progress-track>div {
+  height:100%;
+  width:0;
+  background:var(--green);
+  transition:width .2s
+}
+.progress-summary {
+  font-size:11px;
+  color:var(--muted);
+  margin-top:10px
+}
+.queue-reason {
+  color:#9b4323;
+  background:#fff3e8;
+  padding:10px 13px;
+  font-size:12px;
+  line-height:1.8;
+  margin-top:15px;
+  white-space:pre-wrap
+}
+.queue-items,.deny-items {
+  list-style:none;
+  padding:0;
+  margin:16px 0 0
+}
+.queue-item {
+  display:grid;
+  grid-template-columns:minmax(100px,1fr) auto;
+  gap:7px 18px;
+  padding:12px 0;
+  border-top:1px solid #e9eef4
+}
+.queue-item strong {
+  font-size:12px;
+  font-weight:600
+}
+.queue-item .item-reason {
+  grid-column:1/-1;
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.8;
+  white-space:pre-wrap
+}
+.resolve-actions {
+  display:flex;
+  gap:8px;
+  grid-column:1/-1;
+  flex-wrap:wrap
+}
+.resolve-actions .button {
+  font-size:11px;
+  min-height:34px
+}
+.deny-section {
+  padding:0 3px;
+  margin:22px 0;
+  color:var(--ink)
+}
+summary {
+  font-size:12px;
+  font-weight:600;
+  cursor:pointer;
+  padding:8px 0
+}
+summary::marker {
+  color:#7a91a9
+}
+.deny-items li {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:15px;
+  border-top:1px solid var(--line);
+  padding:10px 0;
+  font-size:12px
+}
+.deny-items small {
+  color:var(--muted);
+  font-size:10px;
+  margin-left:10px
+}
+footer {
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  padding-top:12px;
+  border-top:1px solid var(--line);
+  color:var(--muted);
+  font-size:10px;
+  line-height:1.8
+}
+.sr-only {
+  position:absolute;
+  width:1px;
+  height:1px;
+  margin:-1px;
+  padding:0;
+  overflow:hidden;
+  clip:rect(0,0,0,0);
+  white-space:nowrap;
+  border:0
+}
+[hidden] {
+  display:none!important
+}
+@media(min-width:1500px) {
+  main {
+    padding-inline:44px
+  }
+  .sidebar {
+    padding-inline:25px
+  }
+  body {
+    grid-template-columns:250px minmax(0,1fr)
+  }
+}
+@media(max-width:1160px) {
+  body {
+    grid-template-columns:210px minmax(0,1fr)
+  }
+  .sidebar {
+    padding:25px 17px
+  }
+  main {
+    padding:25px 22px
+  }
+  .settings-grid {
+    gap:20px;
+    grid-template-columns:minmax(0,1fr) minmax(260px,1fr)
+  }
+  .workbench {
+    grid-template-columns:minmax(0,1.3fr) minmax(280px,1fr)
+  }
+  .preview-pane {
+    padding:20px 17px
+  }
+  .roster-heading {
+    padding-inline:17px
+  }
+  .roster-tools {
+    padding-inline:17px
+  }
+  .optional {
+    display:block;
+    margin:5px 0 0
+  }
+  .queue-section>.section-heading {
+    align-items:flex-start
+  }
+  .queue-controls .button {
+    padding:7px 10px
+  }
+}
+@media(max-width:930px) {
+  body {
+    grid-template-columns:185px minmax(0,1fr)
+  }
+  .sidebar {
+    padding-inline:14px
+  }
+  .brand {
+    font-size:23px;
+    gap:9px
+  }
+  .brand-mark {
+    width:37px;
+    height:37px
+  }
+  .settings-grid {
+    grid-template-columns:1fr;
+    gap:20px
+  }
+  .config-fields {
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:0 15px
+  }
+  .number-fields {
+    grid-column:1/-1
+  }
+  .config-fields>label {
+    grid-column:1/-1
+  }
+  .config-fields>select {
+    grid-column:1/-1
+  }
+  .config-fields>.field-help {
+    grid-column:1/-1
+  }
+  .workbench {
+    grid-template-columns:1fr
+  }
+  .preview-pane {
+    border-left:0;
+    border-top:1px solid var(--line)
+  }
+  .queue-section>.section-heading {
+    flex-direction:column;
+    align-items:stretch
+  }
+  .queue-controls {
+    justify-content:flex-start
+  }
+  .page-header {
+    align-items:flex-start
+  }
+  h1 {
+    font-size:23px
+  }
+  .mode-badge {
+    padding:6px 9px;
+    font-size:10px
+  }
+}
+@media(max-width:620px) {
+  body {
+    display:block
+  }
+  .sidebar {
+    position:static;
+    height:auto;
+    padding:18px 20px;
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px 12px
+  }
+  .brand {
+    grid-column:1/-1;
+    margin-bottom:7px
+  }
+  .sidebar-rule,.sidebar>.sidebar-help:not(#connection-detail),.sidebar-label {
+    display:none
+  }
+  #connection-detail {
+    grid-column:1/-1;
+    margin:0 0 7px
+  }
+  .sidebar-bottom {
+    grid-column:1/-1;
+    margin:0;
+    padding-top:3px
+  }
+  .sidebar-bottom .sidebar-help,.local-label {
+    display:none
+  }
+  .connection-heading {
+    grid-column:1/-1
+  }
+  .shop-name {
+    grid-column:1/-1;
+    font-size:16px;
+    margin:2px 0 8px
+  }
+  .sidebar-button {
+    margin:0;
+    min-height:37px
+  }
+  .sidebar-button.secondary {
+    grid-column:auto
+  }
+  main {
+    padding:22px 15px 16px
+  }
+  .settings,.queue-section {
+    padding:20px 17px
+  }
+  .settings>.section-heading {
+    align-items:flex-start;
+    flex-direction:column;
+    gap:7px
+  }
+  .page-header {
+    margin-bottom:21px;
+    gap:10px
+  }
+  .page-header p {
+    font-size:11px
+  }
+  .mode-badge {
+    white-space:normal;
+    min-width:71px;
+    text-align:center
+  }
+  .roster-heading {
+    align-items:flex-start
+  }
+  .roster-tools {
+    align-items:flex-start
+  }
+  .check-label {
+    max-width:70%;
+    line-height:1.6
+  }
+  .table-scroll {
+    max-height:390px
+  }
+  th:nth-child(2) {
+    width:39%
+  }
+  th:nth-child(3) {
+    width:25%
+  }
+  th:last-child {
+    width:26%
+  }
+  td {
+    padding-inline:7px
+  }
+  .checkbox-column {
+    width:33px
+  }
+  td:first-child,th:first-child {
+    padding-left:14px
+  }
+  footer {
+    flex-direction:column;
+    gap:4px
+  }
+}
+@media(prefers-reduced-motion:reduce) {
+  *,*::before,*::after {
+    transition:none!important;
+    scroll-behavior:auto!important
+  }
+}
+FILE: tests\fixtures\workbench.html
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>工作台模拟验收 · 本地</title></head><body>
+<p>正在加载本地工作台模拟环境；不会访问 Shopee。</p>
+<script type="module">
+import { createBackend } from '../../extension/core/backend.mjs';
+import { inspectPage } from '../../extension/page-snapshot.mjs';
+const fixture=document.createElement('iframe');fixture.src='/tests/fixtures/marketplace.html';fixture.style='position:fixed;left:-10000px;top:0;width:900px;height:700px;border:0';document.body.append(fixture);
+await new Promise(resolve=>fixture.addEventListener('load',resolve,{once:true}));
+let data={},sessionData={},injected=false;
+const source=await (await fetch('../../extension/content.js')).text();
+const api={runtime:{id:'test-extension',getURL:path=>`chrome-extension://test-extension/${path}`},storage:{local:{get:async()=>structuredClone(data),set:async values=>{data={...data,...structuredClone(values)}}},session:{get:async()=>structuredClone(sessionData),set:async values=>{sessionData={...sessionData,...values}}}},tabs:{create:async()=>({id:77}),get:async()=>({id:77,url:'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace',status:'complete'})},scripting:{executeScript:async()=>{
+ if(!injected){injected=true;fixture.contentWindow.chrome={runtime:{sendMessage:async message=>{try{return {ok:true,...await backend.handle(message,{id:'test-extension',tab:{id:77},frameId:0,url:'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace'})}}catch(e){return {ok:false,error:e.message}}}}};fixture.contentWindow.eval(source)}return [];
+}}};
+const backend=createBackend(api,{readSnapshot:async(tabId,text)=>{
+ const page=fixture.contentWindow.eval(`(${inspectPage.toString()})(${JSON.stringify(text||'')})`);
+ // This override exists only in the local fixture, never in production code.
+ return {...page,origin:'https://seller.shopee.co.id'};
+}});
+const panelSender={id:'test-extension',url:api.runtime.getURL('dashboard.html')};
+window.chrome={runtime:{sendMessage:async message=>{try{const result=await backend.handle(message,panelSender);if(message.type==='panel:open')await api.scripting.executeScript({});return {ok:true,...result}}catch(e){return {ok:false,error:e.message}}}}};
+window.__fixtureBackend=backend;window.__fixtureFrame=fixture;
+const html=await (await fetch('../../extension/dashboard.html')).text();
+const parsed=new DOMParser().parseFromString(html,'text/html');
+document.head.append(Object.assign(document.createElement('link'),{rel:'stylesheet',href:'../../extension/dashboard.css'}));
+document.title='本地模拟 · 印尼达人建联';
+for(const child of [...document.body.children])if(child!==fixture)child.remove();
+for(const child of [...parsed.body.children])document.body.append(child);
+await import('../../extension/dashboard.mjs');
+</script></body></html>
+FILE: tests\fixtures\marketplace.html
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>虚构达人页面 · 仅本地测试</title><style>
+body{font:15px "Microsoft YaHei",sans-serif;padding:28px;background:#f3f6fa;color:#173453}table{width:100%;border-collapse:collapse;background:white}td,th{padding:15px;text-align:left;border-bottom:1px solid #dce3ec}button,select,textarea{font:inherit;padding:10px}#sidebar-minichat-list{margin-top:28px;background:white;padding:22px;border:1px solid #dce3ec}textarea{display:block;width:85%;min-height:80px}.pqq6o4R57Y{display:inline-block;background:#e9492d;color:white;padding:10px;cursor:pointer}.plW8rzAMob{display:block;min-width:60px;min-height:18px}#messagesContainer{min-height:35px;margin:12px 0}.message{padding:10px;background:#e6f4ed;margin:8px 0}.test-label{color:#9c3d26}i{font-style:normal}
+</style></head><body>
+<h1>虚构达人名单</h1><p class="test-label">此页面不连接 Shopee。所有身份、消息和发送结果均为本地模拟。</p>
+<label>模拟发送结果 <select id="result-mode"><option value="sent">取得回执</option><option value="uncertain">只有本地回显，无可靠回执</option><option value="failed">发送失败</option></select></label>
+<table><thead><tr><th>达人</th><th>聊天</th></tr></thead><tbody>
+<tr class="kol-card-item" data-row-key="0_101"><td><div class="kol-card-item-name">Ayu 示例达人</div><div class="kol-card-item-username">ayu_demo</div></td><td><button type="button"><svg width="18" height="18"><use href="#icon-chat-new"></use></svg> 打开聊天</button></td></tr>
+<tr class="kol-card-item" data-row-key="1_102"><td><div class="kol-card-item-name">Bima 示例达人</div><div class="kol-card-item-username">bima_demo</div></td><td><button type="button"><svg width="18" height="18"><use href="#icon-chat-new"></use></svg> 打开聊天</button></td></tr>
+<tr class="kol-card-item" data-row-key="2_103"><td><div class="kol-card-item-name">Citra 示例达人</div><div class="kol-card-item-username">citra_demo</div></td><td><button type="button"><svg width="18" height="18"><use href="#icon-chat-new"></use></svg> 打开聊天</button></td></tr>
+</tbody></table>
+<section id="sidebar-minichat-list" hidden><h2 class="lyWL3rDmij"></h2><div id="messagesContainer"></div><textarea aria-label="模拟消息"></textarea><div class="pqq6o4R57Y"><i class="plW8rzAMob" role="button" tabindex="0">模拟发送</i></div></section>
+<script>
+window.__fixtureClickCount=0;
+window.__$unstable_useRootStoreOutside=()=>({shopId:700,shopName:'演示店铺（虚构）',isLoggedIn:true});
+const rows=[...document.querySelectorAll('tr.kol-card-item')];
+let current=null,sequence=1000;
+const editor=document.querySelector('textarea'),root=document.querySelector('#sidebar-minichat-list'),messages=document.querySelector('#messagesContainer');
+rows.forEach((row,index)=>{
+  const data={affiliateId:101+index,shopeeUserId:201+index,displayName:row.querySelector('.kol-card-item-name').textContent,username:row.querySelector('.kol-card-item-username').textContent};
+  row.__reactFiber$fixture={memoizedProps:{data}};
+  row.querySelector('button').addEventListener('click',()=>{
+    current={id:String(900+index),to_id:String(data.shopeeUserId),shop_id:'700',opposite_last_deliver_msg_id:'0'};
+    editor.__reactFiber$fixture={memoizedProps:{shopId:700,buyerId:data.shopeeUserId,currentConversation:current,currentUser:{id:7000}}};
+    root.hidden=false; root.querySelector('.lyWL3rDmij').textContent=data.displayName; messages.replaceChildren(); editor.value='';
+  });
+});
+document.querySelector('.plW8rzAMob').addEventListener('click',()=>{
+  if(!current||!editor.value)return;
+  window.__fixtureClickCount++;
+  const status=document.querySelector('#result-mode').value,id=String(++sequence),text=editor.value;
+  const node=document.createElement('div');node.className='message';node.textContent=text;
+  node.__reactFiber$fixture={memoizedProps:{message:{id,from_id:'7000',from_shop_id:'700',to_id:current.to_id,content:{text},status:status==='uncertain'?'pending':status}}};
+  messages.append(node);if(status==='sent')current.opposite_last_deliver_msg_id=id;editor.value='';
+});
+</script></body></html>
+FILE: tests\content.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { readFile } from 'node:fs/promises';
+
+const source = await readFile(new URL('../extension/content.js', import.meta.url), 'utf8').catch(() => '');
+const turn = () => new Promise(resolve => setImmediate(resolve));
+
+function runner(mode = 'dry-run', authorize = true) {
+  let sendClicks = 0, value = '', page = { shop: { id: '10' }, creators: [{ id: '20', rowKey: '0_99', chatAvailable: true }], chat: null, blocked: false };
+  const editor = { get value() { return value; }, set value(v) { value = v; }, isConnected: true, dispatchEvent() {}, disabled: false, readOnly: false };
+  const header = { textContent: 'Ayu' };
+  const button = { isConnected: true, click() { sendClicks++; value = ''; page.chat.messages = [{ id: '2', confirmed: true }]; } };
+  const chatButton = { disabled: false, querySelectorAll: () => [{ getAttribute: name => name === 'xlink:href' ? '#icon-chat-new' : null }], click() { page.chat = { shopId: '10', recipientId: '20', editorFound: true, sendFound: true, evidenceSupported: true, editorText: '', messages: [], headerText: 'Ayu' }; } };
+  const row = { getAttribute: () => '0_99', querySelectorAll: () => [chatButton] };
+  const messages = [], timers = [];
+  const command = { type: 'prepare', taskId: 't', sessionId: 's', itemId: '20', creator: { id: '20', name: 'Ayu' }, text: 'Halo Ayu', mode };
+  let next = 'prepare';
+  const context = {
+    crypto: { randomUUID: () => 'page' }, location: { origin: 'https://seller.shopee.co.id' },
+    document: {
+      querySelectorAll: selector => selector.startsWith('tr.') ? [row] : [],
+      querySelector: selector => selector.includes('textarea') ? editor : selector.includes('lyWL3rDmij') ? header : selector.includes('plW8rzAMob') ? button : null,
+    },
+    HTMLTextAreaElement: function () {}, Event: class {},
+    setTimeout: (fn, delay) => { if (delay < 1000) queueMicrotask(fn); else timers.push(fn); }, clearTimeout() {},
+    addEventListener() {},
+    chrome: { runtime: { sendMessage: async message => {
+      messages.push(message);
+      if (message.type === 'page:snapshot') return { ok: true, snapshot: structuredClone({ ...page, chat: page.chat && { ...page.chat, editorText: value } }) };
+      if (message.type === 'page:poll') { const type = next; next = null; return { ok: true, command: type ? { ...command, type } : null }; }
+      if (message.type === 'page:prepared') next = 'send';
+      if (message.type === 'page:authorize') return { ok: true, command: authorize ? { ...command, type: 'permit' } : null };
+      return { ok: true };
+    } } },
+  };
+  Object.defineProperty(context.HTMLTextAreaElement.prototype, 'value', { set(v) { value = v; } });
+  vm.runInNewContext(source, context);
+  return { context, messages, timers, clicks: () => sendClicks, value: () => value, setValue: text => { value = text; }, async advance() { await turn(); const timer = timers.shift(); if (timer) timer(); await turn(); await turn(); } };
+}
+
+test('页面脚本已实现并在演练模式完整执行但不点击发送或填入草稿', async () => {
+  assert.ok(source.includes('page:authorize'), '缺少页面执行与授权逻辑');
+  const r = runner();
+  for (let i = 0; i < 5; i++) await r.advance();
+  assert.equal(r.clicks(), 0); assert.equal(r.value(), '');
+  assert.equal(r.messages.find(message => message.type === 'page:result')?.outcome, 'rehearsed');
+});
+
+test('真实模式只在拿到一次许可后点击一次，匹配新回执才报告成功', async () => {
+  const r = runner('send');
+  for (let i = 0; i < 5; i++) await r.advance();
+  assert.equal(r.clicks(), 1);
+  assert.equal(r.messages.find(message => message.type === 'page:result')?.outcome, 'sent');
+});
+
+test('许可被拒绝时不发送并清除本次工具写入的草稿', async () => {
+  const r = runner('send', false);
+  for (let i = 0; i < 5; i++) await r.advance();
+  assert.equal(r.clicks(), 0); assert.equal(r.value(), '');
+});
+
+test('发送前出现与本次文本相同的用户草稿，也不能清除用户草稿', async () => {
+  const r = runner('send');
+  await r.advance();
+  r.setValue('Halo Ayu');
+  for (let i = 0; i < 3; i++) await r.advance();
+  assert.equal(r.clicks(), 0); assert.equal(r.value(), 'Halo Ayu');
+});
+FILE: tests\backend.test.mjs
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createBackend } from '../extension/core/backend.mjs';
+
+function fixture() {
+  let data = {}, sessionData = {}, writes = 0, failWrite = false;
+  const snapshot = { origin: 'https://seller.shopee.co.id', shop: { id: '10', name: '示例店铺' }, creators: [{ id: '20', name: 'Ayu', rowKey: '0_99', chatAvailable: true }], chat: { shopId: '10', recipientId: '20', editorFound: true, sendFound: true, editorText: '', evidenceSupported: true, messages: [] }, blocked: false };
+  const api = {
+    runtime: { id: 'demo', getURL: path => `chrome-extension://demo/${path}` },
+    storage: { local: { get: async () => structuredClone(data), set: async values => { writes++; if (failWrite) throw new Error('disk'); data = { ...data, ...structuredClone(values) }; } }, session: { get: async () => structuredClone(sessionData), set: async values => { sessionData = { ...sessionData, ...values }; } } },
+    tabs: { create: async () => ({ id: 7 }), get: async id => ({ id, url: 'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace', status: 'complete' }) },
+    scripting: { executeScript: async () => [] },
+  };
+  const panel = { id: 'demo', url: api.runtime.getURL('dashboard.html') };
+  const sender = { id: 'demo', tab: { id: 7 }, frameId: 0, url: 'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace' };
+  let counter = 0;
+  const backend = createBackend(api, { readSnapshot: async () => structuredClone(snapshot), uid: () => `uid-${++counter}`, now: () => 1000 });
+  const call = (type, body = {}, from = panel) => backend.handle({ type, ...body }, from);
+  const config = { shop: snapshot.shop, creators: snapshot.creators, template: 'Halo {{name}}', intervalSeconds: 30, limit: 1, mode: 'dry-run' };
+  const connect = async () => { await call('panel:open'); await call('page:hello', { pageId: 'page-1' }, sender); };
+  return { backend, call, config, connect, sender, snapshot, api, data: () => data, writes: () => writes, fail: () => { failWrite = true; }, restartSession: () => { sessionData = {}; } };
+}
+
+test('外域、原有标签页和伪造面板不能操作队列', async () => {
+  const f = fixture();
+  await assert.rejects(f.call('panel:get', {}, { id: 'demo', url: 'https://example.com' }));
+  await assert.rejects(f.call('page:hello', { pageId: 'p' }, f.sender), /专用/);
+  await f.connect();
+  await assert.rejects(f.call('page:poll', { pageId: 'page-1' }, { ...f.sender, tab: { id: 8 } }), /专用/);
+  await assert.rejects(f.call('page:poll', { pageId: 'page-1' }, { ...f.sender, frameId: 1 }), /顶层/);
+});
+
+test('预览后配置变化必须重新预览，未经预览不能启动', async () => {
+  const f = fixture(); await f.connect();
+  await assert.rejects(f.call('panel:start', { config: f.config }), /预览/);
+  const preview = await f.call('panel:preview', { config: f.config });
+  await assert.rejects(f.call('panel:start', { config: { ...f.config, template: 'changed' }, previewToken: preview.previewToken }), /预览/);
+  const task = await f.call('panel:start', { config: f.config, previewToken: preview.previewToken });
+  assert.equal(task.state.task.status, 'running');
+});
+
+test('并发 poll 只派发一次，存储成功后才能返回指令', async () => {
+  const f = fixture(); await f.connect();
+  const preview = await f.call('panel:preview', { config: f.config });
+  await f.call('panel:start', { config: f.config, previewToken: preview.previewToken });
+  const responses = await Promise.all([f.call('page:poll', { pageId: 'page-1' }, f.sender), f.call('page:poll', { pageId: 'page-1' }, f.sender)]);
+  assert.equal(responses.filter(r => r.command?.type === 'prepare').length, 1);
+  assert.equal(f.data().creatorQueue.task.items[0].status, 'preparing');
+  assert.ok(f.writes() > 0);
+});
+
+test('写盘失败不交付指令，后续操作保持阻断', async () => {
+  const f = fixture(); await f.connect();
+  const preview = await f.call('panel:preview', { config: f.config });
+  await f.call('panel:start', { config: f.config, previewToken: preview.previewToken });
+  f.fail();
+  await assert.rejects(f.call('page:poll', { pageId: 'page-1' }, f.sender), /保存|存储/);
+  await assert.rejects(f.call('page:poll', { pageId: 'page-1' }, f.sender), /保存|存储/);
+});
+
+test('页面重载暂停旧任务；后台重新实例化不重新派发活跃指令', async () => {
+  const f = fixture(); await f.connect();
+  const preview = await f.call('panel:preview', { config: f.config });
+  await f.call('panel:start', { config: f.config, previewToken: preview.previewToken });
+  await f.call('page:poll', { pageId: 'page-1' }, f.sender);
+  const reloaded = await f.call('page:hello', { pageId: 'page-2' }, f.sender);
+  assert.equal(reloaded.state.task.status, 'paused');
+  assert.equal((await f.call('page:poll', { pageId: 'page-1' }, f.sender)).command, null);
+  const nextBackend = createBackend(f.api, { readSnapshot: async () => f.snapshot });
+  assert.equal((await nextBackend.handle({ type: 'panel:get' }, { id: 'demo', url: f.api.runtime.getURL('dashboard.html') })).state.task.status, 'paused');
+});
+
+async function beginSend(f) {
+  await f.connect();
+  const config = { ...f.config, mode: 'send' };
+  const preview = await f.call('panel:preview', { config });
+  await f.call('panel:start', { config, previewToken: preview.previewToken, confirmed: true });
+  const { command } = await f.call('page:poll', { pageId: 'page-1' }, f.sender);
+  const context = { pageId: 'page-1', taskId: command.taskId, sessionId: command.sessionId, itemId: command.itemId, text: command.text };
+  await f.call('page:prepared', { ...context, ok: true }, f.sender);
+  await f.call('page:poll', { pageId: 'page-1' }, f.sender);
+  f.snapshot.chat.editorText = command.text;
+  return context;
+}
+
+test('真实发送须明确确认，许可返回前已保存发送意图和授权状态', async () => {
+  const f = fixture(); await f.connect();
+  const config = { ...f.config, mode: 'send' };
+  const preview = await f.call('panel:preview', { config });
+  await assert.rejects(f.call('panel:start', { config, previewToken: preview.previewToken }), /确认/);
+  const g = fixture(), context = await beginSend(g);
+  assert.equal(g.data().creatorQueue.history['10']['20'].status, 'uncertain');
+  assert.equal((await g.call('page:authorize', context, g.sender)).command.type, 'permit');
+  assert.equal(g.data().creatorQueue.task.items[0].authorized, true);
+  assert.equal((await g.call('page:authorize', context, g.sender)).command, null);
+});
+
+test('发送端自报成功但缺少新回执时，后台保守记录待核对', async () => {
+  const f = fixture(), context = await beginSend(f);
+  await f.call('page:authorize', context, f.sender);
+  await f.call('page:result', { ...context, outcome: 'sent', baselineIds: [] }, f.sender);
+  const { state } = await f.call('panel:get');
+  assert.equal(state.task.status, 'paused');
+  assert.equal(state.task.items[0].status, 'uncertain');
+});
+
+test('发送准备后加入拒绝名单仍阻止最终授权', async () => {
+  const f = fixture(), context = await beginSend(f);
+  await f.call('panel:deny', { shopId: '10', creatorId: '20', name: 'Ayu', blocked: true });
+  assert.equal((await f.call('page:authorize', context, f.sender)).command, null);
+  assert.equal(f.data().creatorQueue.task.status, 'paused');
+});
+
+test('切换账号后暂停旧任务并拒绝在新店铺恢复', async () => {
+  const f = fixture(), context = await beginSend(f);
+  await f.call('page:authorize', context, f.sender);
+  f.snapshot.shop = { id: '11', name: '另一示例店铺' };
+  await f.call('page:poll', { pageId: 'page-1' }, f.sender);
+  const { state, workspace } = await f.call('panel:get');
+  assert.equal(state.task.status, 'paused'); assert.equal(state.task.items[0].status, 'uncertain');
+  assert.equal(workspace.shop.id, '11');
+  await assert.rejects(f.call('panel:resume'), /店铺/);
+});
+
+test('已暂停任务可明确结束，保留防重发记录后才能建立新任务', async () => {
+  const f = fixture(), context = await beginSend(f);
+  await f.call('page:authorize', context, f.sender);
+  await f.call('page:result', { ...context, outcome: 'uncertain' }, f.sender);
+  await assert.rejects(f.call('panel:finish'), /核对/);
+  await f.call('panel:resolve', { itemId: '20', resolution: 'skip' });
+  const { state } = await f.call('panel:finish');
+  assert.equal(state.task.status, 'completed');
+  assert.equal(state.history['10']['20'].status, 'uncertain');
+});
+
+test('Chrome 重启或扩展重载后，不按旧标签页编号注入用户其他标签页', async () => {
+  const f = fixture(); await f.connect();
+  const preview = await f.call('panel:preview', { config: f.config });
+  await f.call('panel:start', { config: f.config, previewToken: preview.previewToken });
+  f.restartSession();
+  const restarted = createBackend(f.api, { readSnapshot: async () => f.snapshot });
+  const result = await restarted.handle({ type: 'panel:get' }, { id: 'demo', url: f.api.runtime.getURL('dashboard.html') });
+  assert.equal(result.workspace, null);
+  assert.equal(result.state.task.status, 'paused');
+});
+FILE: extension\background.mjs
+import { createBackend } from './core/backend.mjs';
+
+const backend = createBackend(chrome);
+chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => {});
+chrome.action.onClicked.addListener(() => { chrome.tabs.create({ url: chrome.runtime.getURL('dashboard.html') }); });
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  backend.handle(message, sender).then(result => respond({ ok: true, ...result }), error => respond({ ok: false, error: error.message }));
+  return true;
+});
+chrome.tabs.onUpdated.addListener((tabId, change) => { backend.onUpdated(tabId, change).catch(() => {}); });
+chrome.tabs.onRemoved.addListener(tabId => { backend.onRemoved(tabId).catch(() => {}); });
+FILE: extension\content.js
+(() => {
+  if (globalThis.__creatorOutreachPage && !globalThis.__creatorOutreachPage.stopped) return;
+  const pageId = crypto.randomUUID();
+  const control = { pageId, stopped: false, prepared: null };
+  globalThis.__creatorOutreachPage = control;
+  const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  const editorNode = () => document.querySelector('#sidebar-minichat-list textarea');
+  const sendNode = () => document.querySelector('#sidebar-minichat-list .pqq6o4R57Y .plW8rzAMob');
+  const headerNode = () => document.querySelector('#sidebar-minichat-list .lyWL3rDmij');
+  const setText = (editor, value) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+    if (!setter) throw new Error('无法安全填入消息');
+    setter.call(editor, value);
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  async function call(type, body = {}) {
+    const response = await chrome.runtime.sendMessage({ type, pageId, ...body });
+    if (!response?.ok) throw new Error(response?.error || '页面连接已中断');
+    return response;
+  }
+  const context = command => ({ taskId: command.taskId, sessionId: command.sessionId, itemId: command.itemId, text: command.text });
+  const read = async text => (await call('page:snapshot', { text })).snapshot;
+  function checkChat(snapshot, command, shopId) {
+    const chat = snapshot?.chat;
+    if (snapshot?.blocked || snapshot?.shop?.id !== shopId || chat?.shopId !== shopId || chat?.recipientId !== command.itemId) throw new Error('聊天身份或页面状态已变化');
+    if (!chat.editorFound || !chat.sendFound || !chat.evidenceSupported) throw new Error('聊天控件或回执结构已变化');
+    return chat;
+  }
+  async function prepare(command) {
+    control.prepared = null;
+    try {
+      const snapshot = await read();
+      const creator = snapshot.creators.find(creator => creator.id === command.itemId && creator.chatAvailable);
+      if (!creator || !snapshot.shop?.id) throw new Error('达人已不在当前可见名单');
+      const row = [...document.querySelectorAll('tr.kol-card-item[data-row-key]')].find(row => row.getAttribute('data-row-key') === creator.rowKey);
+      const button = [...row?.querySelectorAll('button') || []].find(button => [...button.querySelectorAll('use')].some(use => (use.getAttribute('xlink:href') || use.getAttribute('href')) === '#icon-chat-new'));
+      if (!button || button.disabled) throw new Error('达人聊天入口不可用');
+      button.click();
+      let chat;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const current = await read();
+        if (current.chat?.recipientId === command.itemId) { chat = checkChat(current, command, snapshot.shop.id); break; }
+        if (current.blocked || current.shop?.id !== snapshot.shop.id) throw new Error('店铺或页面状态变化');
+        await wait(250);
+      }
+      if (!chat) throw new Error('等待聊天页面超时');
+      if (chat.editorText) throw new Error('当前聊天已有草稿');
+      const editor = editorNode(), send = sendNode();
+      if (!editor || !send) throw new Error('聊天控件无法识别');
+      control.prepared = { itemId: command.itemId, sessionId: command.sessionId, shopId: snapshot.shop.id, editor, send, headerText: headerNode()?.textContent?.trim() || '' };
+      await call('page:prepared', { ...context(command), ok: true });
+    } catch {
+      await call('page:prepared', { ...context(command), ok: false });
+    }
+  }
+  async function executeSend(command) {
+    const prepared = control.prepared;
+    let clicked = false, authorized = false, wroteDraft = false, baselineIds = [];
+    const clearOwnDraft = async () => {
+      if (!wroteDraft || clicked || !prepared?.editor?.isConnected || prepared.editor !== editorNode() || prepared.editor.value !== command.text) return;
+      const current = await read().catch(() => null);
+      if (current?.shop?.id === prepared.shopId && current?.chat?.recipientId === command.itemId && prepared.editor.value === command.text) setText(prepared.editor, '');
+    };
+    try {
+      if (!prepared || prepared.sessionId !== command.sessionId || prepared.itemId !== command.itemId) throw new Error('准备会话已失效');
+      const before = await read(command.text);
+      const chat = checkChat(before, command, prepared.shopId);
+      if (chat.editorText || prepared.editor !== editorNode() || prepared.send !== sendNode()) throw new Error('聊天草稿或控件已变化');
+      baselineIds = chat.messages.map(message => message.id);
+      if (command.mode === 'send') { wroteDraft = true; setText(prepared.editor, command.text); }
+      const permit = (await call('page:authorize', context(command))).command;
+      if (!permit || permit.type !== 'permit' || permit.sessionId !== command.sessionId || permit.itemId !== command.itemId || permit.mode !== command.mode) { await clearOwnDraft(); return; }
+      authorized = true;
+      if (command.mode === 'dry-run') {
+        await call('page:result', { ...context(command), outcome: 'rehearsed' });
+        return;
+      }
+      if (control.stopped || !prepared.editor.isConnected || prepared.editor !== editorNode() || prepared.send !== sendNode() || prepared.editor.value !== command.text || (headerNode()?.textContent?.trim() || '') !== prepared.headerText) throw new Error('发送前页面已变化');
+      clicked = true; // Never retry after this line, even if click throws.
+      prepared.send.click();
+      let outcome = 'uncertain';
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const current = await read(command.text);
+        const after = checkChat(current, command, prepared.shopId);
+        if (after.messages.some(message => message.failed && !baselineIds.includes(message.id))) { outcome = 'failed'; break; }
+        if (after.messages.some(message => message.confirmed && !baselineIds.includes(message.id))) { outcome = 'sent'; break; }
+        await wait(500);
+      }
+      await call('page:result', { ...context(command), outcome, baselineIds });
+    } catch {
+      await clearOwnDraft();
+      if (authorized) await call('page:result', { ...context(command), outcome: 'uncertain', baselineIds }).catch(() => {});
+      else await call('page:error', context(command)).catch(() => {});
+    } finally {
+      control.prepared = null;
+    }
+  }
+  async function tick() {
+    if (control.stopped) return;
+    try {
+      const { command } = await call('page:poll');
+      if (command?.type === 'prepare') await prepare(command);
+      else if (command?.type === 'send') await executeSend(command);
+    } catch {
+      // Losing the runtime or storage connection never means repeat a send.
+      await call('page:error').catch(() => {});
+      control.stopped = true;
+    }
+    if (!control.stopped) setTimeout(tick, 1000);
+  }
+  addEventListener('pagehide', () => { control.stopped = true; });
+  call('page:hello').then(() => { if (!control.stopped) setTimeout(tick, 1000); }).catch(() => { control.stopped = true; });
+})();
+FILE: extension\core\queue.mjs
+// This reducer owns dispatch intent; the caller must persist its result before acting.
+export function initialState() {
+  return { version: 1, task: null, history: {}, denied: {} };
+}
+
+function requiredText(value, label) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${label}不能为空`);
+  return value.trim();
+}
+
+function normalizeConfig(config) {
+  if (!config || typeof config !== 'object') throw new Error('任务配置无效');
+  const shop = { id: requiredText(config.shop?.id, '店铺标识'), name: requiredText(config.shop?.name, '店铺名称') };
+  if (!Array.isArray(config.creators) || !config.creators.length) throw new Error('达人名单不能为空');
+  if (config.creators.length > 200) throw new Error('达人名单最多 200 人');
+  const creators = config.creators.map(creator => ({ id: requiredText(creator?.id, '达人标识'), name: requiredText(creator?.name, '达人名称') }));
+  if (typeof config.template !== 'string' || !config.template.trim()) throw new Error('消息模板不能为空');
+  if (config.template.length > 2000) throw new Error('消息模板最多 2000 字');
+  const remainder = config.template.replace(/\{\{name\}\}/g, '');
+  if (remainder.includes('{{') || remainder.includes('}}')) throw new Error('模板只支持 {{name}} 变量，请检查未知或未闭合变量');
+  if (typeof config.intervalSeconds !== 'number' || !Number.isFinite(config.intervalSeconds) || config.intervalSeconds <= 0) throw new Error('发送间隔必须是正有限数');
+  if (!Number.isInteger(config.limit) || config.limit <= 0) throw new Error('单次上限必须是正整数');
+  if (!['dry-run', 'send'].includes(config.mode)) throw new Error('任务模式无效');
+  return { shop, creators, template: config.template, intervalSeconds: config.intervalSeconds, limit: config.limit, mode: config.mode };
+}
+
+function own(object, key) {
+  return object && Object.hasOwn(object, key) ? object[key] : undefined;
+}
+
+function nested(object, shopId, creatorId) {
+  return own(own(object, shopId), creatorId);
+}
+
+function put(object, key, value) {
+  Object.defineProperty(object, key, { value, configurable: true, writable: true, enumerable: true });
+}
+
+function putNested(object, shopId, creatorId, value) {
+  if (!own(object, shopId)) put(object, shopId, {});
+  put(own(object, shopId), creatorId, value);
+}
+
+function skipReason(state, shopId, creatorId) {
+  if (nested(state.denied, shopId, creatorId)) return '拒绝名单';
+  if (nested(state.history, shopId, creatorId)) return '已有发送或不确定记录';
+  return null;
+}
+
+export function previewTask(state, config) {
+  const snapshot = normalizeConfig(config);
+  const seen = new Set();
+  let sendableCount = 0;
+  const items = snapshot.creators.map(creator => {
+    let reason = seen.has(creator.id) ? '名单重复' : skipReason(state, snapshot.shop.id, creator.id);
+    seen.add(creator.id);
+    if (!reason && sendableCount >= snapshot.limit) reason = '超过单次上限';
+    if (!reason) sendableCount++;
+    const text = snapshot.template.replace(/\{\{name\}\}/g, () => creator.name);
+    if (!text.trim()) throw new Error('渲染后的消息不能为空');
+    return { ...creator, text, status: reason ? 'skipped' : 'pending', reason, authorized: false };
+  });
+  return { items, sendableCount, skippedCount: items.length - sendableCount };
+}
+
+function normalizeBinding(binding) {
+  if (!Number.isInteger(binding?.tabId) || binding.tabId < 0) throw new Error('标签页绑定无效');
+  return { tabId: binding.tabId, pageId: requiredText(binding.pageId, '页面标识') };
+}
+
+function matches(task, event) {
+  return task && task.sessionId !== null && event.sessionId === task.sessionId && event.tabId === task.binding.tabId && event.pageId === task.binding.pageId && event.shopId === task.config.shop.id;
+}
+
+function recordHistory(state, item, status, now) {
+  const task = state.task;
+  putNested(state.history, task.config.shop.id, item.id, { status, taskId: task.id, sessionId: task.sessionId, updatedAt: now });
+}
+
+function clearIntent(state, item) {
+  const task = state.task;
+  const history = nested(state.history, task.config.shop.id, item.id);
+  if (history?.status === 'uncertain' && history.taskId === task.id && history.sessionId === task.sessionId) delete own(state.history, task.config.shop.id)[item.id];
+}
+
+function resetPending(item) {
+  item.status = 'pending';
+  item.authorized = false;
+  item.reason = null;
+}
+
+function terminalRequest(task) {
+  return task.status === 'stopping' ? 'stopped' : task.status === 'pausing' ? 'paused' : null;
+}
+
+function workCommand(task, item, type) {
+  return { type, taskId: task.id, sessionId: task.sessionId, itemId: item.id, creator: { id: item.id, name: item.name }, text: item.text, mode: task.config.mode };
+}
+
+export function reduceQueue(state, event, { now = Date.now(), uid = () => crypto.randomUUID() } = {}) {
+  const next = structuredClone(state);
+  const task = next.task;
+  let command = null;
+  const done = () => ({ state: next, command });
+  const touch = () => { task.updatedAt = now; };
+
+  if (event.type === 'deny') {
+    const shopId = requiredText(event.shopId, '店铺标识');
+    const creatorId = requiredText(event.creatorId, '达人标识');
+    if (typeof event.blocked !== 'boolean') throw new Error('拒绝名单状态无效');
+    if (event.blocked) putNested(next.denied, shopId, creatorId, { name: typeof event.name === 'string' ? event.name.trim() : '' });
+    else if (own(next.denied, shopId)) delete own(next.denied, shopId)[creatorId];
+    return done();
+  }
+
+  if (event.type === 'start') {
+    if (task && task.status !== 'completed') throw new Error('请先完成当前任务，不能同时启动新任务');
+    const config = normalizeConfig(event.config);
+    const { items, sendableCount } = previewTask(next, config);
+    if (!sendableCount) throw new Error('没有可处理的达人');
+    next.task = { id: uid(), sessionId: uid(), binding: normalizeBinding(event.binding), config, status: 'running', items, nextAt: now, reason: null, createdAt: now, updatedAt: now };
+    return done();
+  }
+  if (!task) return done();
+
+  if (event.type === 'pause' || event.type === 'stop') {
+    if (!['running', 'pausing', 'stopping'].includes(task.status)) return done();
+    const stopping = event.type === 'stop' || task.status === 'stopping';
+    task.reason = stopping ? '用户停止' : (event.reason || '用户暂停');
+    const active = task.items.find(item => ['preparing', 'prepared', 'sending'].includes(item.status));
+    if (active?.status === 'sending' && !active.authorized) {
+      clearIntent(next, active);
+      resetPending(active);
+    } else if (active?.status === 'prepared') resetPending(active);
+    const waiting = active?.status === 'preparing' || (active?.status === 'sending' && active.authorized);
+    task.status = waiting ? (stopping ? 'stopping' : 'pausing') : (stopping ? 'stopped' : 'paused');
+    touch();
+    return done();
+  }
+
+  if (event.type === 'interrupt') {
+    if (task.status === 'completed') return done();
+    for (const item of task.items) {
+      if (item.status === 'sending' && item.authorized) {
+        item.status = 'uncertain';
+        item.reason = event.reason || '发送过程已中断，请人工核对';
+      } else if (['preparing', 'prepared', 'sending'].includes(item.status)) {
+        clearIntent(next, item);
+        resetPending(item);
+      }
+    }
+    task.status = 'paused';
+    task.reason = event.reason || '页面连接中断';
+    task.sessionId = null; // Reject every late callback until a new session is created.
+    touch();
+    return done();
+  }
+
+  if (event.type === 'resume') {
+    if (!['paused', 'stopped'].includes(task.status)) throw new Error('只能恢复已暂停或已停止的任务');
+    if (task.items.some(item => item.status === 'uncertain')) throw new Error('请先人工核对不确定的发送结果');
+    task.binding = normalizeBinding(event.binding);
+    task.sessionId = uid();
+    for (const item of task.items) if (item.status === 'failed') { item.status = 'skipped'; item.reason ||= '失败项不自动重试'; }
+    task.status = task.items.some(item => item.status === 'pending') ? 'running' : 'completed';
+    task.reason = null;
+    task.nextAt = Math.max(now, task.nextAt);
+    touch();
+    return done();
+  }
+
+  if (event.type === 'resolve') {
+    if (task.status === 'running') throw new Error('请先暂停任务再人工核对');
+    if (!['sent', 'skip'].includes(event.resolution)) throw new Error('人工核对结论无效');
+    const item = task.items.find(item => item.id === event.itemId && item.status === 'uncertain');
+    if (!item) return done();
+    if (event.resolution === 'sent') {
+      item.status = task.config.mode === 'dry-run' ? 'rehearsed' : 'sent';
+      if (task.config.mode === 'send') recordHistory(next, item, 'confirmed', now);
+    } else item.status = 'skipped';
+    item.reason = event.resolution === 'sent' ? '人工确认已完成' : '人工跳过，保留防重发记录';
+    touch();
+    return done();
+  }
+
+  if (!matches(task, event)) return done();
+  if (event.type === 'poll') {
+    if (task.status !== 'running' || now < task.nextAt || task.items.some(item => ['preparing', 'sending'].includes(item.status))) return done();
+    const prepared = task.items.find(item => item.status === 'prepared');
+    if (prepared) {
+      prepared.status = 'sending';
+      prepared.authorized = false;
+      if (task.config.mode === 'send') recordHistory(next, prepared, 'uncertain', now);
+      command = workCommand(task, prepared, 'send');
+    } else {
+      for (const item of task.items) {
+        if (item.status !== 'pending') continue;
+        const reason = skipReason(next, task.config.shop.id, item.id);
+        if (reason) { item.status = 'skipped'; item.reason = reason; continue; }
+        item.status = 'preparing';
+        command = workCommand(task, item, 'prepare');
+        break;
+      }
+      if (!command) task.status = 'completed';
+    }
+    touch();
+    return done();
+  }
+
+  if (event.type === 'prepared') {
+    const item = task.items.find(item => item.id === event.itemId && item.status === 'preparing');
+    if (!item) return done();
+    const requested = terminalRequest(task);
+    if (requested) { resetPending(item); task.status = requested; }
+    else if (task.status !== 'running') return done();
+    else if (event.ok === true) item.status = 'prepared';
+    else { item.status = 'failed'; item.reason = event.reason || '页面准备失败'; task.status = 'paused'; task.reason = item.reason; }
+    touch();
+    return done();
+  }
+
+  if (event.type === 'authorize') {
+    const item = task.items.find(item => item.id === event.itemId && item.status === 'sending');
+    if (task.status !== 'running' || !item || item.authorized) return done();
+    item.authorized = true;
+    command = { type: 'permit', taskId: task.id, sessionId: task.sessionId, itemId: item.id, mode: task.config.mode };
+    touch();
+    return done();
+  }
+
+  if (event.type === 'result') {
+    const item = task.items.find(item => item.id === event.itemId && item.status === 'sending' && item.authorized);
+    if (!item || !['running', 'pausing', 'stopping'].includes(task.status)) return done();
+    const requested = terminalRequest(task);
+    const expectedSuccess = task.config.mode === 'send' ? 'sent' : 'rehearsed';
+    const outcome = [expectedSuccess, 'failed', 'uncertain'].includes(event.outcome) ? event.outcome : 'uncertain';
+    item.status = outcome;
+    item.reason = event.reason || (outcome === 'uncertain' ? '发送结果不确定，请人工核对' : outcome === 'failed' ? '发送失败' : null);
+    if (outcome === 'sent') recordHistory(next, item, 'confirmed', now);
+    if (outcome === expectedSuccess) {
+      task.nextAt = now + task.config.intervalSeconds * 1000;
+      task.status = requested || (task.items.some(item => item.status === 'pending') ? 'running' : 'completed');
+      if (!requested) task.reason = null;
+    } else {
+      task.status = requested || 'paused';
+      task.reason = item.reason;
+    }
+    touch();
+  }
+  return done();
+}
+FILE: extension\core\page-guards.mjs
+export function validatePage(snapshot) {
+  if (snapshot?.origin !== 'https://seller.shopee.co.id') throw new Error('只支持印尼 Shopee 卖家页面');
+  if (!snapshot.shop?.id || !snapshot.shop?.name) throw new Error('无法核对店铺身份，请先在专用页面登录');
+  if (snapshot.blocked) throw new Error('页面出现验证或操作限制，请人工处理后重新读取');
+  return snapshot;
+}
+
+export function validateChat(snapshot, creator, shopId, expectedText) {
+  validatePage(snapshot);
+  const chat = snapshot.chat;
+  if (snapshot.shop.id !== shopId || chat?.shopId !== shopId) throw new Error('店铺已变化，任务已暂停');
+  if (chat?.recipientId !== creator.id) throw new Error('聊天收件人不符，任务已暂停');
+  if (!chat.editorFound || !chat.sendFound) throw new Error('聊天控件无法识别，请检查页面版本');
+  if (!chat.evidenceSupported) throw new Error('无法核对聊天回执结构，已阻止发送');
+  if (expectedText === undefined && chat.editorText) throw new Error('当前聊天已有草稿，请人工处理后再继续');
+  if (expectedText !== undefined && chat.editorText !== expectedText) throw new Error('消息文本与预览不符，已阻止发送');
+  return chat;
+}
+
+export function deliveryConfirmed(chat, baselineIds) {
+  const baseline = new Set(baselineIds);
+  return !!chat?.messages?.some(message => message.confirmed === true && message.id && !baseline.has(message.id));
+}
+FILE: extension\core\backend.mjs
+import { initialState, previewTask, reduceQueue } from './queue.mjs';
+import { validatePage, validateChat, deliveryConfirmed } from './page-guards.mjs';
+import { inspectPage } from '../page-snapshot.mjs';
+
+const MARKETPLACE = 'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace';
+const ACTIVE = new Set(['running', 'pausing', 'stopping']);
+
+export function createBackend(api, { now = () => Date.now(), uid = () => crypto.randomUUID(), readSnapshot } = {}) {
+  let state, workspace, browserSessionId, loaded = false, faulted = false, preview = null;
+  let serial = Promise.resolve();
+  const snapshot = readSnapshot || (async (tabId, text = '') => {
+    const results = await api.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: inspectPage, args: [text] });
+    if (!results?.[0]?.result) throw new Error('无法读取专用页面，请刷新连接');
+    return results[0].result;
+  });
+  const payload = () => ({ state: structuredClone(state), workspace: structuredClone(workspace) });
+  const enqueue = action => {
+    const result = serial.then(action);
+    serial = result.catch(() => {});
+    return result;
+  };
+  async function initialize() {
+    if (loaded) return;
+    const saved = await api.storage.local.get(['creatorQueue', 'creatorWorkspace']);
+    if (saved.creatorQueue && saved.creatorQueue.version !== 1) throw new Error('本地记录版本不兼容，请先导出备份');
+    state = saved.creatorQueue || initialState();
+    workspace = saved.creatorWorkspace || null;
+    const session = await api.storage.session.get('creatorBrowserSession');
+    browserSessionId = session.creatorBrowserSession || uid();
+    if (!session.creatorBrowserSession) await api.storage.session.set({ creatorBrowserSession: browserSessionId });
+    loaded = true;
+    if (workspace && workspace.browserSessionId !== browserSessionId) {
+      await interrupt('浏览器或扩展已重新启动，请重新创建专用页面并核对任务');
+      await save(state, null);
+    }
+  }
+  async function save(nextState = state, nextWorkspace = workspace) {
+    try {
+      await api.storage.local.set({ creatorQueue: nextState, creatorWorkspace: nextWorkspace });
+      state = nextState;
+      workspace = nextWorkspace;
+    } catch {
+      faulted = true;
+      throw new Error('本地存储保存失败，已阻止后续操作；请关闭专用页面后重新加载扩展');
+    }
+  }
+  async function apply(event) {
+    const result = reduceQueue(state, event, { now: now(), uid });
+    await save(result.state);
+    return result.command;
+  }
+  function requirePanel(sender) {
+    if (sender.id !== api.runtime.id || sender.url !== api.runtime.getURL('dashboard.html')) throw new Error('只允许扩展工作台操作任务');
+  }
+  function requirePage(sender) {
+    if (sender.frameId !== 0) throw new Error('仅允许顶层专用页面');
+    if (sender.id !== api.runtime.id || !workspace || sender.tab?.id !== workspace.tabId) throw new Error('此标签页不是工具创建的专用页面');
+    let url;
+    try { url = new URL(sender.url); } catch { throw new Error('专用页面地址无效'); }
+    if (url.origin !== 'https://seller.shopee.co.id') throw new Error('专用页面已离开印尼卖家站');
+  }
+  async function interrupt(reason) {
+    preview = null;
+    if (state.task && state.task.status !== 'completed') await apply({ type: 'interrupt', reason });
+  }
+  async function read(text = '') {
+    if (!workspace) throw new Error('请先打开专用达人页面');
+    const page = validatePage(await snapshot(workspace.tabId, text));
+    if (state.task && ACTIVE.has(state.task.status) && page.shop.id !== state.task.config.shop.id) {
+      await interrupt('店铺账号已变化，请重新核对；旧任务不会在新店铺继续');
+    }
+    if (workspace.shop?.id !== page.shop.id) preview = null;
+    workspace = { ...workspace, shop: page.shop, creators: page.creators || [], error: null };
+    return page;
+  }
+  function signature(config) {
+    return JSON.stringify({ shop: config.shop, creators: config.creators.map(({ id, name }) => ({ id, name })), template: config.template, intervalSeconds: config.intervalSeconds, limit: config.limit, mode: config.mode });
+  }
+  function checkConfig(config, page) {
+    if (!config || config.shop?.id !== page.shop.id) throw new Error('店铺身份已变化，请重新读取并预览');
+    if (!Array.isArray(config.creators)) throw new Error('请先选择达人');
+    for (const creator of config.creators) {
+      const current = page.creators?.find(row => row.id === creator.id && row.name === creator.name);
+      if (!current || !current.chatAvailable) throw new Error('名单与当前可见页面不符，或聊天入口不可用；请重新读取');
+    }
+  }
+  async function inject() {
+    if (!workspace) return;
+    const tab = await api.tabs.get(workspace.tabId);
+    if (new URL(tab.url).origin !== 'https://seller.shopee.co.id') throw new Error('专用页面已离开印尼卖家站');
+    await api.scripting.executeScript({ target: { tabId: workspace.tabId }, files: ['content.js'] });
+  }
+  async function expire() {
+    if (!state.task || !ACTIVE.has(state.task.status)) return;
+    const age = now() - (workspace?.lastSeen || 0);
+    const actionAge = now() - state.task.updatedAt;
+    if (age > 45_000 || (state.task.items.some(item => ['preparing', 'sending'].includes(item.status)) && actionAge > 45_000)) {
+      await interrupt('页面响应超时，已暂停；请核对当前结果后恢复');
+    }
+  }
+  async function panel(message) {
+    if (message.type === 'panel:get') { await expire(); return payload(); }
+    if (message.type === 'panel:open') {
+      if (workspace) {
+        try { await api.tabs.get(workspace.tabId); await inject(); return payload(); } catch { await interrupt('原专用页面已关闭或无法连接'); }
+      }
+      const tab = await api.tabs.create({ url: MARKETPLACE, active: false });
+      preview = null;
+      await save(state, { browserSessionId, tabId: tab.id, pageId: null, shop: null, creators: [], lastSeen: now(), error: '页面加载中，请稍后读取名单' });
+      // onUpdated injects after a newly created tab finishes loading.
+      return payload();
+    }
+    if (message.type === 'panel:refresh') {
+      if (state.task && ACTIVE.has(state.task.status)) throw new Error('运行时不能刷新名单，请先暂停');
+      preview = null;
+      try { await inject(); const page = await read(); await save(); return { ...payload(), snapshot: { shop: page.shop, creators: page.creators } }; }
+      catch (error) { if (workspace) { workspace.error = error.message; await save(); } throw error; }
+    }
+    if (message.type === 'panel:preview' || message.type === 'panel:start') {
+      if (!workspace?.pageId) throw new Error('专用页面尚未连接，请重新读取');
+      const page = await read();
+      checkConfig(message.config, page);
+      if (message.type === 'panel:preview') {
+        if (state.task && state.task.status !== 'completed') throw new Error('请先结束当前任务，再建立新任务');
+        const result = previewTask(state, message.config);
+        preview = { token: uid(), signature: signature(message.config), pageId: workspace.pageId, shopId: page.shop.id };
+        await save();
+        return { ...payload(), preview: result, previewToken: preview.token };
+      }
+      if (!preview || preview.token !== message.previewToken || preview.signature !== signature(message.config) || preview.pageId !== workspace.pageId || preview.shopId !== page.shop.id) throw new Error('配置或页面已变化，请重新预览后启动');
+      if (message.config.mode === 'send' && message.confirmed !== true) throw new Error('请先确认本次真实发送的店铺、名单与逐人消息');
+      await apply({ type: 'start', config: message.config, binding: { tabId: workspace.tabId, pageId: workspace.pageId } });
+      preview = null;
+      return payload();
+    }
+    if (message.type === 'panel:pause' || message.type === 'panel:stop') {
+      await apply({ type: message.type.slice(6) }); return payload();
+    }
+    if (message.type === 'panel:resume') {
+      if (!workspace?.pageId) throw new Error('请先连接专用页面');
+      const page = await read();
+      if (state.task?.config.shop.id !== page.shop.id) throw new Error('当前店铺与旧任务不符，不能恢复；请切回原店铺或结束旧任务');
+      await apply({ type: 'resume', binding: { tabId: workspace.tabId, pageId: workspace.pageId } });
+      return payload();
+    }
+    if (message.type === 'panel:resolve') {
+      await apply({ type: 'resolve', itemId: message.itemId, resolution: message.resolution }); return payload();
+    }
+    if (message.type === 'panel:finish') {
+      if (!state.task || !['paused', 'stopped'].includes(state.task.status) || state.task.items.some(item => ['preparing', 'prepared', 'sending', 'uncertain'].includes(item.status))) throw new Error('请先暂停并核对当前项，再结束本任务');
+      const finished = structuredClone(state);
+      for (const item of finished.task.items) if (['pending', 'failed'].includes(item.status)) { item.status = 'skipped'; item.reason ||= '用户结束本任务'; }
+      finished.task.status = 'completed'; finished.task.reason = '用户结束本任务，未处理项已跳过'; finished.task.updatedAt = now();
+      await save(finished); preview = null; return payload();
+    }
+    if (message.type === 'panel:deny') {
+      if (!workspace?.shop || message.shopId !== workspace.shop.id) throw new Error('拒绝名单店铺不符，请重新读取');
+      await apply({ type: 'deny', shopId: message.shopId, creatorId: message.creatorId, name: message.name, blocked: message.blocked });
+      preview = null; return payload();
+    }
+    throw new Error('不支持此工作台操作');
+  }
+  async function page(message, sender) {
+    if (message.type === 'page:hello') {
+      if (typeof message.pageId !== 'string' || !message.pageId || message.pageId.length > 100) throw new Error('页面会话无效');
+      if (workspace.pageId && workspace.pageId !== message.pageId) await interrupt('专用页面已重新加载，请核对后恢复');
+      workspace = { ...workspace, pageId: message.pageId, lastSeen: now() };
+      try { await read(); } catch (error) { workspace.error = error.message; await interrupt(error.message); }
+      await save();
+      return payload();
+    }
+    if (message.pageId !== workspace.pageId) return { command: null };
+    await expire();
+    workspace = { ...workspace, lastSeen: now() };
+    if (message.type === 'page:snapshot') return { snapshot: await read(message.text || '') };
+    if (message.type === 'page:error') { await interrupt('页面执行中断，请核对当前项后恢复'); await save(); return { command: null }; }
+    let current;
+    const expectedText = state.task?.items.find(item => item.id === message.itemId)?.text || '';
+    try { current = await read(['page:authorize', 'page:result'].includes(message.type) ? expectedText : message.text || ''); }
+    catch (error) { await interrupt(error.message); workspace.error = error.message; await save(); return { command: null }; }
+    const task = state.task;
+    const context = { tabId: sender.tab.id, pageId: message.pageId, shopId: current.shop.id, sessionId: message.sessionId ?? task?.sessionId };
+    if (message.type === 'page:poll') {
+      const command = await apply({ type: 'poll', ...context });
+      return { command, shopId: current.shop.id };
+    }
+    if (!task || message.sessionId !== task.sessionId || message.taskId !== task.id) return { command: null };
+    if (message.type === 'page:prepared') {
+      const item = task.items.find(item => item.id === message.itemId);
+      let ok = message.ok === true, reason = '聊天准备失败，请检查页面及现有草稿';
+      if (ok) { try { validateChat(current, item, task.config.shop.id); } catch (error) { ok = false; reason = error.message; } }
+      await apply({ type: 'prepared', ...context, itemId: message.itemId, ok, reason });
+      return { command: null };
+    }
+    if (message.type === 'page:authorize') {
+      const item = task.items.find(item => item.id === message.itemId);
+      const denied = Object.hasOwn(state.denied, task.config.shop.id) && Object.hasOwn(state.denied[task.config.shop.id], message.itemId);
+      if (denied) { await interrupt('该达人已加入拒绝名单，已阻止发送'); return { command: null }; }
+      try { validateChat(current, item, task.config.shop.id, task.config.mode === 'send' ? item.text : undefined); }
+      catch (error) { await interrupt(error.message); return { command: null }; }
+      // Persist the server-observed baseline together with the single-use permit.
+      if (!item.authorized) workspace = { ...workspace, receipt: { taskId: task.id, sessionId: task.sessionId, itemId: item.id, ids: (current.chat.messages || []).map(message => message.id) } };
+      return { command: await apply({ type: 'authorize', ...context, itemId: message.itemId }) };
+    }
+    if (message.type === 'page:result') {
+      let outcome = message.outcome;
+      const receipt = workspace.receipt;
+      if (outcome === 'sent' && (receipt?.taskId !== task.id || receipt?.sessionId !== task.sessionId || receipt?.itemId !== message.itemId || current.chat?.recipientId !== message.itemId || current.chat?.shopId !== task.config.shop.id || !deliveryConfirmed(current.chat, receipt.ids))) outcome = 'uncertain';
+      await apply({ type: 'result', ...context, itemId: message.itemId, outcome, reason: outcome === 'uncertain' ? '未取得可靠发送回执，请人工核对；不会自动重发' : outcome === 'failed' ? '页面发送失败，已暂停；恢复时跳过该项' : null });
+      return { command: null };
+    }
+    throw new Error('不支持此页面操作');
+  }
+  return {
+    handle: (message, sender) => enqueue(async () => {
+      await initialize();
+      if (faulted) throw new Error('本地存储保存失败，已阻止操作；请关闭专用页面后重新加载扩展');
+      if (message?.type?.startsWith('panel:')) { requirePanel(sender); return panel(message); }
+      if (message?.type?.startsWith('page:')) { requirePage(sender); return page(message, sender); }
+      throw new Error('消息类型无效');
+    }),
+    onUpdated: (tabId, change) => enqueue(async () => {
+      await initialize();
+      if (workspace?.tabId !== tabId || faulted) return;
+      if (change.status === 'loading') {
+        await interrupt('专用页面正在导航或刷新，请核对后恢复');
+        await save(state, { ...workspace, pageId: null });
+      }
+      if (change.status === 'complete') { try { await inject(); } catch { await interrupt('专用页面无法连接'); } }
+    }),
+    onRemoved: tabId => enqueue(async () => {
+      await initialize();
+      if (workspace?.tabId !== tabId || faulted) return;
+      await interrupt('专用标签页已关闭，请核对当前项后恢复');
+      await save(state, null);
+    }),
+  };
+}
+FILE: README.md
+# 印尼 Shopee 达人建联工具
+
+独立实现的本地 Chrome 扩展，适配 `seller.shopee.co.id`。从工具新建的达人广场页面读取当前可见名单，选择达人、填写话术并预览后，运行串行自动队列。
+
+## 加载
+
+1. 在 Chrome 打开 `chrome://extensions`，开启“开发者模式”。
+2. 点击“加载已解压的扩展程序”，选择本项目的 `extension` 文件夹。
+3. 点击扩展图标打开工作台，再点击“打开专用 Shopee 页”。初次连接后点击“读取当前页名单”。
+
+无需安装 Node.js 或执行构建即可加载扩展。扩展只声明本地存储、按需脚本注入和印尼卖家站权限，不申请全网站、Cookie、下载或原生程序权限。
+
+## 使用
+
+1. 在工具创建的页面登录并筛选达人，回工作台读取名单，核对显示的店铺。
+2. 明确勾选名单，填写纯文本消息。`{{name}}` 替换为每位达人的姓名；填入逐人间隔及本次处理上限。
+3. 保持默认“演练”，生成逐人预览后启动。演练会打开对应聊天、核对身份和控件，不填草稿、不点击发送，不产生真实已发送记录。
+4. 真实发送需新建真实模式任务、重新预览并勾选发送确认，随后才可启动。队列逐人处理，每次取得可靠结果后按设定间隔等待。
+5. 异常时队列暂停。结果不明须人工检查后标记“确认已发送”或“跳过”；不会自动重发。暂停/停止任务可继续，或明确“结束本任务”后建立下一任务。
+
+保持专用页面打开，运行时不要手动切换聊天、修改草稿、账号或名单。浏览器可能延后后台页面计时；工具不追赶补发，页面无响应时暂停。界面显示暂停/停止后，已触发的发送仍可能完成，无法撤回。
+
+## 数据与边界
+
+- 名单、话术、拒绝名单、状态和防重发历史只保存在扩展本地存储；不采集 Cookie、密码或访问凭证，不向厂商服务上传数据。
+- 按店铺与达人稳定标识去重；换话术或切换演练/真实模式不会绕过去重。切换账号会清空预览并暂停旧任务，不能在另一店铺恢复旧任务。
+- 一次只运行一个任务，最多选择 200 人，模板最多 2000 字。该上限用于控制本地任务规模，不代表平台许可或安全额度。
+- 去重记录不会自动删除。卸载扩展、删除本地扩展数据或换 Chrome 用户配置会丢失记录，使用前通过工作台导出任务结果并自行保管。
+- 页面内部结构可能变化；无法识别店铺、达人、收件人或回执时会阻止发送/暂停。发送意图和页面点击不是一个原子操作，不能承诺绝不重复或绝不漏发。
+
+独立扩展、较长间隔或人工确认均不能保证账号无风控风险。第一版不包含云端达人库、批量翻页采集、跨站点、多店铺并行、定时无人值守、附件或自动追发。
+
+## 开发验证
+
+Node.js 22+，零外部依赖：
+
+```powershell
+node --test tests/*.test.mjs
+node scripts/check.mjs
+node scripts/preview.mjs
+```
+
+本地模拟工作台为 `http://127.0.0.1:4177/`，只使用虚构店铺与达人。“真实发送”选项在此模拟环境中也只写本地虚构聊天，不访问 Shopee。结束时在运行命令的终端按 Ctrl+C 关闭预览服务。
+
+真实页面检查已在用户切换账号后重新验证：店铺身份、可见达人名单、聊天收件人、输入框及发送图标可以识别。没有向真实达人发送消息，真实发送回执尚未实测，不能把本地模拟通过当作真实平台发送成功。
+
+主要文件：`extension/core/queue.mjs` 负责纯队列状态；`extension/core/backend.mjs` 负责串行存储与页面绑定；`extension/page-snapshot.mjs` 只读核对页面身份与回执；`extension/content.js` 执行单个页面操作；`extension/dashboard.*` 提供工作台。
+FILE: AGENTS.md
+# 项目说明
+
+- 本仓库是印尼 Shopee 达人私信的独立本地 Chrome Manifest V3 扩展；可直接加载 `extension/`，没有构建步骤或外部运行依赖。
+- `extension/core/queue.mjs` 是纯状态机，Chrome API 与持久化在 `core/backend.mjs`；后台入口 `background.mjs`，页面核对 `page-snapshot.mjs`，执行器 `content.js`，界面 `dashboard.*`。
+- `tests/fixtures` 的店铺、达人及回执全部虚构；模拟环境的 origin 替换只存在于 fixture，生产扩展不能允许它。
+- 验证命令：`node --test tests/*.test.mjs`、`node scripts/check.mjs`。预览命令：`node scripts/preview.mjs`，仅监听本机 4177 端口。
+- 网站权限只覆盖 `https://seller.shopee.co.id/*`，只给后台记录的专用顶层标签页按需注入；不依赖原安装扩展或厂商服务。
+- 实际 Shopee 发送与回执尚未验证；没有用户明确指定测试达人及授权时，验收使用本地夹具与真实页面的非发送检查。
+FILE: package.json
+{
+  "name": "shopee-id-creator-outreach-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "preview": "node scripts/preview.mjs"
+  },
+  "engines": { "node": ">=22" }
+}

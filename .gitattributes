@@ -1,0 +1,19 @@
+# 源码与文档统一 LF，避免跨平台行尾漂移
+* text=auto eol=lf
+
+# Windows 批处理与 PowerShell 必须是 CRLF：
+# cmd.exe 按行解析；install.ps1 另需 UTF-8 BOM（由文件内容本身保证，Git 不改 BOM）
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# 二进制资源不做行尾转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.crx binary
+*.zip binary
+*.rar binary
+
+# 真实页面录制样本（含整页 DOM，单文件 1~2 MB）：不转换、不参与文本 diff
+tests/fixtures/recorded/*.json -text

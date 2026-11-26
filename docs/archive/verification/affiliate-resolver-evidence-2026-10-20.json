@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "capturedDate": "2026-10-20",
+  "timezone": "Asia/Shanghai",
+  "kind": "live-non-sending-observations",
+  "privacy": "Only routes, field names, counts and boolean comparisons; no original identity, body, contact information, credentials, site source or complete response is retained.",
+  "officialOrigin": "https://seller.shopee.co.id",
+  "marketplace": {
+    "path": "/portal/web-seller-affiliate/kol_marketplace",
+    "searchPlaceholder": "Search by affiliate name",
+    "rowSelector": "tr.kol-card-item[data-row-key]",
+    "rowRecordFields": ["affiliateId", "shopeeUserId", "displayName", "username"],
+    "bothIdsPresentInSameRecord": true,
+    "idsDiffer": true,
+    "rowKeySuffixMatchesAffiliateId": true,
+    "chatBuyerAndConversationRecipientMatchShopeeUserId": true,
+    "chatShopMatchesCurrentShop": true,
+    "normalSearchRequestPath": "/api/v3/affiliateplatform/creator/list",
+    "searchRequestField": "affiliate_name",
+    "affiliateIdAsNameSearch": { "businessCode": 0, "resultCount": 0 },
+    "knownUsernameAsNameSearch": { "businessCode": 0, "resultCount": 1, "exactAffiliateIdMatches": 1 },
+    "searchResponseRecordFields": ["affiliate_id", "shopee_user_id", "display_name", "username"],
+    "rowGeneratedDetailPath": "/portal/web-seller-affiliate/kol_marketplace/detail",
+    "rowGeneratedQueryKeys": ["affiliate_id", "promote_category_id", "pre_page_type"]
+  },
+  "detail": {
+    "path": "/portal/web-seller-affiliate/kol_marketplace/detail",
+    "onlyAffiliateIdQueryLoads": true,
+    "profileCardSelector": "[class*=UserInfo---userinfo-card]",
+    "profileObject": "detail.profile",
+    "profileFields": ["affiliateId", "shopeeUserId", "displayName", "username"],
+    "profileAffiliateIdMatchesQuery": true,
+    "profileShopeeUserIdMatchesComponentProp": true,
+    "componentShopMatchesCurrentShop": true,
+    "detailLoading": false,
+    "chatButtonText": "Chat with Affiliate",
+    "chatButtonIcon": "#icon-chat-new",
+    "chatButtonIsWithinProfileCard": true,
+    "chatBuyerAndConversationRecipientMatchProfile": true,
+    "chatShopMatchesCurrentShop": true,
+    "draftEmpty": true,
+    "mediaCount": 0,
+    "replyCount": 0
+  },
+  "actualModuleLiveCheck": {
+    "module": "extension/affiliate-resolver-page.mjs",
+    "status": "verified",
+    "lockedStatus": "verified",
+    "synchronousInstalledGuardStatus": "verified",
+    "correctLockedOpenChatPerformed": true,
+    "wrongRecipientOpenChatPerformed": false,
+    "staleDocumentOpenChatPerformed": false,
+    "sendClicked": false,
+    "draftWritten": false,
+    "attachmentSelected": false
+  },
+  "manageAffiliates": {
+    "path": "/portal/web-seller-affiliate/favorite_affiliate",
+    "currentListEmpty": true,
+    "massUploadDialogOpened": true,
+    "templateExpectsAffiliateNames": true,
+    "csvLimitShown": 500,
+    "uploadPerformed": false,
+    "numericIdentityMappingVerified": false
+  },
+  "referencePlugin": {
+    "priorEvidence": "docs/reference-plugin-study-2026-10-19.md",
+    "priorSpecifiedModeDisabledForMembership": true,
+    "currentSpecifiedModeRevalidated": false,
+    "currentDetailPageEntryDidNotRevealControls": true,
+    "vendorServicesOrCredentialsUsed": false
+  },
+  "scope": {
+    "liveDetailProfilesChecked": 1,
+    "originalTasksTouched": false,
+    "selfCreatedResearchTabs": 1,
+    "selfCreatedResearchTabsClosed": true,
+    "allAffiliateIdsSupported": "Not asserted; each requested ID must independently produce a verified official profile and available chat entry.",
+    "realSendingVerified": false,
+    "integrationImplementedHere": false
+  }
+}

@@ -1,0 +1,135 @@
+name: publish-release
+
+# 推送到 main 时按 extension/manifest.json 的版本号自动打包并发布 Release；
+# 同名 tag 已存在时跳过，因此改 README、改源码都不会重复发布。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  # 发布前必须先过静态检查与全量行为测试：版本号一改就会发版，
+  # 而扩展内自动更新会把用户直接升到这个包，不能只靠本地自觉。
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 静态检查（语法、Manifest 权限、外部请求）
+        run: node scripts/check.mjs
+
+      - name: 全量行为测试
+        run: node scripts/test.mjs
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Read version
+        id: version
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./extension/manifest.json').version")"
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "$version" != "$package_version" ]; then
+            echo "manifest 与 package.json 版本不一致：$version / $package_version" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "本次提交声明的版本：$version"
+
+      - name: Check whether the release exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "v${{ steps.version.outputs.value }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.version.outputs.value }} 已发布，跳过打包。"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build package
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.value }}"
+          stage="$(mktemp -d)"
+          out="artifacts/xiaren-chrome-v$version.zip"
+          mkdir -p artifacts
+          cp -r extension "$stage/extension"
+          cp distribution/update.cmd distribution/update.ps1 "$stage/"
+          printf '{"repository":"%s","version":"%s"}\n' "$GITHUB_REPOSITORY" "$version" > "$stage/release.json"
+          {
+            printf '虾仁 v%s\n' "$version"
+            printf '首次安装：完整解压到固定目录，Chrome 开发者模式加载其中的 extension 文件夹。\n'
+            printf '更新：结束所有店铺任务后，打开工作台“检查更新”→“自动更新”；首次需选择一次 extension 文件夹。\n'
+            printf '手动兜底：双击原安装目录的 update.cmd，输入 UPDATE，随后在各 profile 的 chrome://extensions 重新加载。\n'
+            printf '保持安装目录不变，不卸载扩展；扩展内更新只替换 extension 文件夹。\n'
+            printf '发布地址：https://github.com/%s/releases/latest\n' "$GITHUB_REPOSITORY"
+          } > "$stage/README.txt"
+          ( cd "$stage" && zip -qr "$OLDPWD/$out" extension update.cmd update.ps1 release.json README.txt )
+          # 只允许安装包出现固定条目，避免带出工作目录或私有文件。
+          entries="$(unzip -Z1 "$out")"
+          for required in extension/manifest.json extension/background.mjs extension/dashboard.html extension/update.html extension/updater.mjs update.cmd update.ps1 release.json README.txt; do
+            echo "$entries" | grep -qx "$required" || { echo "安装包缺少 $required" >&2; exit 1; }
+          done
+          if echo "$entries" | grep -Evq '^(extension/|update\.cmd$|update\.ps1$|release\.json$|README\.txt$|__MACOSX/)'; then
+            echo "安装包包含非白名单条目：" >&2
+            echo "$entries" | grep -Ev '^(extension/|update\.cmd$|update\.ps1$|release\.json$|README\.txt$|__MACOSX/)' >&2
+            exit 1
+          fi
+          embedded="$(unzip -p "$out" extension/manifest.json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).version))")"
+          if [ "$embedded" != "$version" ]; then
+            echo "安装包内版本 $embedded 与 $version 不一致" >&2
+            exit 1
+          fi
+          digest="$(sha256sum "$out" | cut -d' ' -f1)"
+          printf '%s  %s\n' "$digest" "$(basename "$out")" > "$out.sha256"
+          echo "包大小 $(stat -c%s "$out") 字节，SHA256 $digest"
+
+      - name: Publish release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.value }}"
+          notes="$(mktemp)"
+          if [ -f ".github/release-notes/v$version.md" ]; then
+            cp ".github/release-notes/v$version.md" "$notes"
+          else
+            printf '虾仁 v%s\n\n请下载 xiaren-chrome-v%s.zip 与其 SHA256，更新方式见仓库 README。\n' "$version" "$version" > "$notes"
+          fi
+          gh release create "v$version" \
+            "artifacts/xiaren-chrome-v$version.zip" \
+            "artifacts/xiaren-chrome-v$version.zip.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "虾仁 v$version" \
+            --notes-file "$notes" \
+            --latest
+          gh release view "v$version" --repo "$GITHUB_REPOSITORY" --json tagName,assets

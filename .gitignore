@@ -1,18 +1,33 @@
-.superpowers/
+# 构建输出与运行时产物（可随时重建，不入库）
 artifacts/
 node_modules/
-*.log
+
+# 历史版本归档（二进制，权威副本在 GitHub Releases）
+releases/
+
+# 本机工具链与 AI 协作缓存
+.codex/
+.workbuddy/
+.superpowers/
+
+# 发布与更新过程目录
+backups/
+.xiaren-update-*/
+release.json
+
+# 密钥与签名材料：绝不入库
 *.pem
 *.key
 *.p12
 *.pfx
 *.crx
-*.zip
-*.rar
 .env
 .env.*
 !.env.example
-.codex/
-backups/
-.xiaren-update-*/
-release.json
+
+# 大体积分发包
+*.zip
+*.rar
+
+# 日志与临时输出
+*.log

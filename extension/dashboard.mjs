@@ -1,4 +1,9 @@
 import { taskElapsedMs, formatDuration } from './core/task-duration.mjs';
+import { activeHistory, HISTORY_WINDOW_DAYS } from './core/history-window.mjs';
+import {
+  MAX_MESSAGES, MAX_TEXT_LENGTH, MAX_LINK_LENGTH, MAX_TASK_NAME_LENGTH,
+  isDeliverableLink, hasUnknownVariable,
+} from './core/message-rules.mjs';
 
 const $ = id => document.getElementById(id);
 const ui = Object.fromEntries([
@@ -98,6 +103,7 @@ function own(object, key) {
 function shop() { return workspace?.shop || null; }
 function deniedForShop() { return own(state.denied, shop()?.id) || {}; }
 function isDenied(id) { return Boolean(own(deniedForShop(), id)); }
+function hasHistoryRecord(id) { return Boolean(activeHistory(state, shop()?.id, id, Date.now())); }
 function taskOpen() { return Boolean(state.task && state.task.status !== 'completed'); }
 function hasActiveItem() { return (state.task?.items || []).some(item => ['preparing', 'prepared', 'sending'].includes(item.status)); }
 function connected() { return Boolean(workspace?.shop?.id && workspace?.pageId && !workspace.error); }
@@ -186,7 +192,7 @@ function changeSelection(type, values = {}) {
   });
 }
 function readDraftMessages() {
-  if (messageDraft.length < 1 || messageDraft.length > 10) throw new Error('消息序列须包含 1—10 条消息。');
+  if (messageDraft.length < 1 || messageDraft.length > MAX_MESSAGES) throw new Error(`消息序列须包含 1—${MAX_MESSAGES} 条消息。`);
   return messageDraft.map((message, index) => {
     const label = `第 ${index + 1} 条消息`;
     if (message.type === 'image') {
@@ -198,15 +204,16 @@ function readDraftMessages() {
     }
     if (!['text', 'link'].includes(message.type) || typeof message.content !== 'string' || !message.content.trim()) throw new Error(`${label}不能为空，请填写内容或删除此条。`);
     if (message.type === 'text') {
-      if (message.content.length > 2400) throw new Error(`${label}最多 2400 字。`);
-      const remainder = message.content.replace(/\{\{name\}\}/g, '');
-      if (remainder.includes('{{') || remainder.includes('}}')) throw new Error(`${label}只支持 {{name}}，请检查未知或未闭合变量。`);
+      if (message.content.length > MAX_TEXT_LENGTH) throw new Error(`${label}最多 ${MAX_TEXT_LENGTH} 字。`);
+      if (hasUnknownVariable(message.content)) throw new Error(`${label}只支持 {{name}}，请检查未知或未闭合变量。`);
       return { type: 'text', content: message.content };
     }
     const content = message.content.trim();
-    let url;
-    try { url = new URL(content); } catch { throw new Error(`${label}须填写完整的 HTTP 或 HTTPS 产品链接。`); }
-    if (content.length > 2000 || /\s/.test(content) || !/^https?:\/\//i.test(content) || !['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error(`${label}须为不含空白或凭证的完整网址，最多 2000 字。`);
+    // 与后台共用同一套链接规则：先区分“不是网址”，再区分“不允许发”。
+    if (!isDeliverableLink(content)) {
+      try { new URL(content); } catch { throw new Error(`${label}须填写完整的 HTTP 或 HTTPS 产品链接。`); }
+      throw new Error(`${label}须为不含空白或凭证的完整网址，最多 ${MAX_LINK_LENGTH} 字。`);
+    }
     return { type: 'link', content };
   });
 }
@@ -633,7 +640,7 @@ function restoreDashboardDraft() {
     if (!raw) return;
     if (raw.length > 300000) throw new Error('draft too large');
     const draft = JSON.parse(raw);
-    if (draft?.version !== 1 || ![1, 2].includes(draft.currentStep) || !Array.isArray(draft.messages) || draft.messages.length < 1 || draft.messages.length > 10
+    if (draft?.version !== 1 || ![1, 2].includes(draft.currentStep) || !Array.isArray(draft.messages) || draft.messages.length < 1 || draft.messages.length > MAX_MESSAGES
         || draft.messages.some(message => !['text', 'link', 'image'].includes(message?.type) || (message.type !== 'image' && typeof message.content !== 'string'))
         || dashboardDraftFields.some(id => typeof draft.fields?.[id] !== 'string')) throw new Error('invalid draft');
     for (const id of dashboardDraftFields) ui[id].value = draft.fields[id];
@@ -677,7 +684,7 @@ function getMessageSettings() {
   const intervalSeconds = Number(ui.interval.value);
   if (!ui.interval.value.trim() || !Number.isFinite(intervalSeconds) || intervalSeconds < 1) throw new Error('请填写不小于 1 秒的逐人间隔。');
   const taskName = ui['task-name'].value.trim();
-  if (taskName.length > 80) throw new Error('任务名称最多 80 字。');
+  if (taskName.length > MAX_TASK_NAME_LENGTH) throw new Error(`任务名称最多 ${MAX_TASK_NAME_LENGTH} 字。`);
   return { messages, intervalSeconds, ...(taskName ? { taskName } : {}) };
 }
 function draftChanged() { templateEditRevision++; resetConfirmation(); render(); }
@@ -719,7 +726,7 @@ function makeEditorRow(message) {
     if (!editable() || message.type !== 'text') return;
     const start = content.selectionStart ?? content.value.length, end = content.selectionEnd ?? start;
     const next = content.value.slice(0, start) + '{{name}}' + content.value.slice(end);
-    if (next.length > 2400) { showNotice('插入姓名变量后超过 2400 字，请先缩短内容。', 'error'); return; }
+    if (next.length > MAX_TEXT_LENGTH) { showNotice(`插入姓名变量后超过 ${MAX_TEXT_LENGTH} 字，请先缩短内容。`, 'error'); return; }
     message.content = next; draftChanged(); content.focus();
     content.selectionStart = content.selectionEnd = start + 8;
   });
@@ -747,7 +754,7 @@ function renderEditor() {
     row.type.value = message.type;
     for (const option of row.type.children) if (option.value === 'image') option.disabled = !imageMessagesAvailable;
     if (row.content.value !== (message.content || '')) row.content.value = message.content || '';
-    row.content.maxLength = message.type === 'text' ? 2400 : 2000;
+    row.content.maxLength = message.type === 'text' ? MAX_TEXT_LENGTH : MAX_LINK_LENGTH;
     row.content.placeholder = message.type === 'text' ? '输入消息，可插入 {{name}} 称呼达人' : 'https://shopee.co.id/product/…';
     row.content.disabled = !editable() || image; row.type.disabled = !editable();
     row.content.hidden = row.label.hidden = row.foot.hidden = image;
@@ -771,9 +778,9 @@ function renderEditor() {
       row.imagePreview.replaceChildren(); renderImagePreview(row.imagePreview, message);
     }
   });
-  ui['message-add'].disabled = !editable() || messageDraft.length >= 10;
+  ui['message-add'].disabled = !editable() || messageDraft.length >= MAX_MESSAGES;
   ui['message-reset'].disabled = !editable();
-  text(ui['message-sequence-count'], `${messageDraft.length} / 10`);
+  text(ui['message-sequence-count'], `${messageDraft.length} / ${MAX_MESSAGES}`);
   ui['image-library-status'].hidden = !messageDraft.some(message => message.type === 'image');
   text(ui['image-library-status'], imageCapacity ? `本机图片 ${imageCapacity.count} / ${imageCapacity.limit} 张；图片库容量最多 4 MiB，满时会拒绝新增并保留原图。` : '图片仅保存在本机；最多 20 张，满时会拒绝新增并保留原图。');
 }
@@ -1041,9 +1048,8 @@ function renderRoster() {
   const creators = creatorList();
   const { entries, pages } = rosterPageEntries(creators);
   const taskItems = new Map((state.task?.items || []).map(item => [item.id, item]));
-  const history = own(state.history, shop()?.id) || {};
   reconcile(ui['roster-body'], rosterRows, entries, makeRosterRow, (row, creator) => {
-    const blocked = isDenied(creator.id);
+    const blocked = isDenied(creator.id), recorded = hasHistoryRecord(creator.id);
     const c = selectionView(), included = c?.selectionVersion === 1 ? c.selectedIds.includes(creator.id) : ['ready', 'consumed'].includes(c?.status);
     row.checkbox.checked = included;
     row.checkbox.disabled = !selectionEditable() || (c?.unavailableIds || []).includes(creator.id) || (!included && c.count >= c.target);
@@ -1055,10 +1061,11 @@ function renderRoster() {
     let status = c?.selectionVersion === 1 ? included ? '已选' : (c.excludedIds || []).includes(creator.id) ? '已取消' : '备选' : '可建联';
     let mood = '';
     if (blocked) { status = '拒绝名单'; mood = 'warn'; }
-    else if (own(history, creator.id)) { status = '已有防重发记录'; mood = 'warn'; }
+    else if (recorded) { status = '已有防重发记录'; mood = 'warn'; }
     else if (creator.chatAvailable === false) { status = '暂无聊天入口'; mood = 'warn'; }
     else if (taskItems.has(creator.id)) { const item = taskItems.get(creator.id); status = statusNames[item.status] || '待检查'; mood = statusMood(item.status); }
     setTag(row.tag, status, mood);
+    row.tag.title = recorded ? `防重发记录自最后一次发送起保留 ${HISTORY_WINDOW_DAYS} 天，到期自动释放` : '';
     text(row.deny, blocked ? '解除拒绝' : '加入拒绝');
     row.deny.disabled = !editable() || !connected() || needsPreparation;
   });
@@ -1306,7 +1313,7 @@ ui['message-next'].addEventListener('click', () => {
 });
 ui['message-back'].addEventListener('click', () => { if (!busy) { currentStep = 1; render(); } });
 ui['message-add'].addEventListener('click', () => {
-  if (!editable() || messageDraft.length >= 10) return;
+  if (!editable() || messageDraft.length >= MAX_MESSAGES) return;
   messageDraft.push({ id: ++nextMessageId, type: 'text', content: '', contentId: `message-content-${nextMessageId}` });
   draftChanged();
 });

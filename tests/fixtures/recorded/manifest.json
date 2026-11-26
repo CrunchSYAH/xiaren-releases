@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "sourceKind": "real-rendered-dom-and-whitelisted-runtime",
+  "cases": [
+    {
+      "name": "list",
+      "file": "list.json",
+      "sha256": "78d3117ba171b46baeb7525ffbe42af0a39e8aa4f2b50920e85ae6969917fb63",
+      "capturedAt": "2026-10-16T02:35:15.924Z",
+      "creators": 12,
+      "recipientId": null,
+      "messageSamples": 0,
+      "emptyWatermark": null
+    },
+    {
+      "name": "chat-01",
+      "file": "chat-01.json",
+      "sha256": "b5d9507453f4f51b820a3b87c61e2a55408e2d9d537758fc67706dc29d94667c",
+      "capturedAt": "2026-10-16T02:35:40.654Z",
+      "creators": 12,
+      "recipientId": "201",
+      "messageSamples": 0,
+      "emptyWatermark": true
+    },
+    {
+      "name": "chat-02",
+      "file": "chat-02.json",
+      "sha256": "7cdc89bc7a1b3d92d6a3b6dc940ee885d35fce4b9a6d2f7df77f9ad0c259815d",
+      "capturedAt": "2026-10-16T02:36:09.23Z",
+      "creators": 12,
+      "recipientId": "202",
+      "messageSamples": 0,
+      "emptyWatermark": true
+    },
+    {
+      "name": "chat-03",
+      "file": "chat-03.json",
+      "sha256": "0ed6c68b26d91b463e321429788924cf6db67750a00efe5062d16f3c735e8702",
+      "capturedAt": "2026-10-16T02:36:13.246Z",
+      "creators": 12,
+      "recipientId": "203",
+      "messageSamples": 0,
+      "emptyWatermark": true
+    }
+  ],
+  "missingEvidence": [
+    "历史消息样本",
+    "真实成功/失败回执",
+    "网络发送过程",
+    "平台验证和风控行为"
+  ],
+  "redactions": [
+    "账号与达人身份",
+    "聊天文本及草稿",
+    "资源与跳转地址",
+    "原站脚本和事件",
+    "头像及远程字体"
+  ],
+  "replay": "真实结构与白名单属性链机械恢复；交互和发送由离线测试替身提供"
+}

@@ -1,11 +1,12 @@
 {
   "name": "shopee-id-creator-outreach-local",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
+    "test": "node scripts/test.mjs",
     "check": "node scripts/check.mjs",
+    "verify": "node scripts/check.mjs && node scripts/test.mjs",
     "build:local-test": "node scripts/build-local-test.mjs",
     "preview": "node scripts/preview.mjs"
   },

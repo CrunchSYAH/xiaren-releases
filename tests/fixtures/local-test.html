@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>虾仁 · 本地插件测试</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f6f8;color:#243348;font:15px/1.7 "Microsoft YaHei",sans-serif}header{background:#e9492d;color:white;padding:22px max(24px,calc((100vw - 1000px)/2));font-size:20px;font-weight:700}main{max-width:1000px;margin:34px auto;padding:0 24px}h1{font-size:29px;line-height:1.4;margin-bottom:12px}h2{font-size:20px;margin-top:30px}p{max-width:820px}ol{padding-left:24px}li{padding:5px 0}code{background:#e9edf2;padding:3px 7px;border-radius:4px;overflow-wrap:anywhere}a{color:#bc351e;text-underline-offset:3px}.note{border-left:4px solid #e9492d;background:white;padding:15px 20px}.checks{background:white;padding:18px 24px;border:1px solid #dae0e8}.muted{color:#596879}footer{border-top:1px solid #d6dce3;padding:20px 0;margin-top:32px}a:focus-visible{outline:3px solid #e9492d;outline-offset:4px}
+</style></head><body>
+<header>虾仁 · 仅本机测试</header><main>
+<h1>在真实页面的脱敏副本中测试 Chrome 插件</h1>
+<p class="note">副本保存了实际采集的页面结构、计算样式和必要运行状态，账号、达人身份与文本已替换。原站脚本和网络行为没有带入；点击与回执由本地替身提供。测试版只申请本机权限。</p>
+<h2>加载本地测试版插件</h2>
+<ol>
+<li>保持“启动本地测试”命令窗口运行。</li>
+<li>在 Chrome 地址栏输入 <code>chrome://extensions</code>，开启“开发者模式”。</li>
+<li>点击“加载已解压的扩展程序”，在项目文件夹内选择 <code>artifacts\extension-local-test</code>。名称应为“虾仁 · 仅本地测试版”。以前已加载过该测试版，点击该卡片的“重新加载”，再重新打开工作台。</li>
+<li>点击 Chrome 工具栏中的该测试版图标，再点击工作台的“打开本地模拟页”。等页面加载后，点击“读取当前页名单”。</li>
+<li>初始店铺为脱敏名 <code>sample_shop</code>。仅选择“样本达人 01—03”，其余九位未采集聊天，不能用来验收发送。模板填 <code>Halo {{name}}, ini pesan uji.</code>，间隔填 <code>2</code>，上限填 <code>2</code>，先运行演练。</li>
+</ol>
+<h2>依次检查这五种结果</h2>
+<div class="checks"><ol>
+<li><strong>演练：</strong>选前三人、上限两人，预期两人已演练、一人跳过；页面左下角“离线发送点击”为 0。</li>
+<li><strong>实采状态：</strong>保持左下角“保留实采状态”，工作台切“本地模拟发送”后核对内容、确认并运行。采到的空聊天缺少历史回执依据，预期阻止点击并暂停；这正是原页面的当前限制。</li>
+<li><strong>派生发送场景：</strong>先结束旧任务，再在页面选“模拟：提供成功回执”，点“新模拟店铺批次”，回工作台重新读取、核对内容并确认。选前三人、上限两人，预期成功两人、点击两次。也可选“仅回显，结果不明”或“明确失败”检查暂停和人工核对。</li>
+<li><strong>身份或页面异常：</strong>另起批次，在“派生异常”选择收件人变化、验证提示或控件缺失，运行后预期阻止发送或暂停。</li>
+<li><strong>中断与恢复：</strong>任务运行时暂停、刷新或关闭工具专用模拟页；队列不应自行重发。结果不明必须先人工核对。</li>
+</ol></div>
+<p class="muted">“新模拟店铺批次”是人为派生的身份，用于隔离防重发记录。换场景前先暂停并结束旧任务；有待核对项须先人工处理，再新建任务。不要删除正式插件数据。</p>
+<h2>页面结构与测试边界</h2>
+<p>本次实际保存四份样本：12 位达人的列表及前三位的空白聊天。原页观察与离线识别已逐字段对比；没有采到历史消息、真实成功或失败回执。模拟回执不能作为这些缺口的证据。</p>
+<p>加载测试版后，可人工验收 Chrome 权限、注入、存储及队列操作。自动检查使用替身 Chrome API，尚不能代替这一步；平台登录、真实网络发送和风控也未验证。</p>
+<footer><a href="/tests/fixtures/recorded/marketplace.html" target="_blank" rel="noopener">查看真实页面脱敏重放</a><p class="muted">插件只操作它自己创建的页面。上方链接用于查看；插件测试请使用工作台中的“打开本地模拟页”。</p></footer>
+</main></body></html>

@@ -1,5 +1,10 @@
 import { normalizeSource } from './audience.mjs';
 import { normalizeImageReference } from './image-assets.mjs';
+import { activeHistory, pruneHistory } from './history-window.mjs';
+import {
+  MESSAGE_TYPES, MAX_MESSAGES, MAX_TEXT_LENGTH, MAX_LINK_LENGTH, MAX_TEMPLATE_LENGTH, MAX_TASK_NAME_LENGTH, MAX_CREATORS,
+  isDeliverableLink, hasUnknownVariable,
+} from './message-rules.mjs';
 
 // This reducer owns dispatch intent; the caller must persist its result before acting.
 export function initialState() {
@@ -14,30 +19,32 @@ function requiredText(value, label) {
 function normalizeText(value, limit) {
   if (typeof value !== 'string' || !value.trim()) throw new Error('消息模板不能为空');
   if (value.length > limit) throw new Error(`消息模板最多 ${limit} 字`);
-  const remainder = value.replace(/\{\{name\}\}/g, '');
-  if (remainder.includes('{{') || remainder.includes('}}')) throw new Error('模板只支持 {{name}} 变量，请检查未知或未闭合变量');
+  if (hasUnknownVariable(value)) throw new Error('模板只支持 {{name}} 变量，请检查未知或未闭合变量');
   return value;
 }
 
 function normalizeLink(value) {
   const link = requiredText(value, '产品链接');
-  let url;
-  try { url = new URL(link); } catch { throw new Error('产品链接必须是完整的 HTTP 或 HTTPS 网址'); }
-  if (link.length > 2000 || /\s/.test(link) || !/^https?:\/\//i.test(link) || !['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password) throw new Error('产品链接必须是不含空格、换行或凭证的完整网址，最多 2000 字');
+  if (!isDeliverableLink(link)) {
+    // 分开两种拒绝原因，界面的提示才有指向性：先判“完全不是网址”，
+    // 再判“是网址但不允许发”（带空白、超长、含凭证）。
+    try { new URL(link); } catch { throw new Error('产品链接必须是完整的 HTTP 或 HTTPS 网址'); }
+    throw new Error(`产品链接必须是不含空格、换行或凭证的完整网址，最多 ${MAX_LINK_LENGTH} 字`);
+  }
   return link;
 }
 
 export function normalizeMessages(value) {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 10) throw new Error('消息序列须包含1—10条消息');
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_MESSAGES) throw new Error(`消息序列须包含1—${MAX_MESSAGES}条消息`);
   return Array.from(value, message => {
-    if (!message || !['text', 'link', 'image'].includes(message.type)) throw new Error('消息类型仅支持文字、产品链接或图片');
+    if (!message || !MESSAGE_TYPES.includes(message.type)) throw new Error('消息类型仅支持文字、产品链接或图片');
     if (message.type === 'image') return normalizeImageReference(message);
-    return { type: message.type, content: message.type === 'text' ? normalizeText(message.content, 2400) : normalizeLink(message.content) };
+    return { type: message.type, content: message.type === 'text' ? normalizeText(message.content, MAX_TEXT_LENGTH) : normalizeLink(message.content) };
   });
 }
 
 export function normalizeTaskName(value) {
-  if (typeof value !== 'string' || value.trim().length > 80) throw new Error('任务名称须为最多80个字符的文字');
+  if (typeof value !== 'string' || value.trim().length > MAX_TASK_NAME_LENGTH) throw new Error(`任务名称须为最多${MAX_TASK_NAME_LENGTH}个字符的文字`);
   return value.trim();
 }
 
@@ -45,14 +52,14 @@ function normalizeConfig(config) {
   if (!config || typeof config !== 'object') throw new Error('任务配置无效');
   const shop = { id: requiredText(config.shop?.id, '店铺标识'), name: requiredText(config.shop?.name, '店铺名称') };
   if (!Array.isArray(config.creators) || !config.creators.length) throw new Error('达人名单不能为空');
-  if (config.creators.length > 200) throw new Error('达人名单最多 200 人');
+  if (config.creators.length > MAX_CREATORS) throw new Error(`达人名单最多 ${MAX_CREATORS} 人`);
   const creators = config.creators.map(creator => ({ id: requiredText(creator?.id, '达人标识'), name: requiredText(creator?.name, '达人名称') }));
   const content = {};
   if (Object.hasOwn(config, 'messages')) {
     if (Object.hasOwn(config, 'template') || Object.hasOwn(config, 'productLink')) throw new Error('消息序列不能与旧话术或产品链接字段混用');
     content.messages = normalizeMessages(config.messages);
   } else {
-    content.template = normalizeText(config.template, 2000);
+    content.template = normalizeText(config.template, MAX_TEMPLATE_LENGTH);
     if (config.productLink !== undefined) content.productLink = normalizeLink(config.productLink);
   }
   if (config.taskName !== undefined) content.taskName = normalizeTaskName(config.taskName);
@@ -61,7 +68,7 @@ function normalizeConfig(config) {
   if (!['dry-run', 'send'].includes(config.mode)) throw new Error('任务模式无效');
   const target = {};
   if (config.collectionId !== undefined || config.targetCount !== undefined) {
-    if (typeof config.collectionId !== 'string' || !config.collectionId.trim() || !Number.isInteger(config.targetCount) || config.targetCount < 1 || config.targetCount > 200 || config.limit !== config.targetCount || creators.length !== config.targetCount) throw new Error('目标人数与锁定名单不符，不能少发启动');
+    if (typeof config.collectionId !== 'string' || !config.collectionId.trim() || !Number.isInteger(config.targetCount) || config.targetCount < 1 || config.targetCount > MAX_CREATORS || config.limit !== config.targetCount || creators.length !== config.targetCount) throw new Error('目标人数与锁定名单不符，不能少发启动');
     target.collectionId = config.collectionId;
     target.targetCount = config.targetCount;
   }
@@ -85,18 +92,18 @@ function putNested(object, shopId, creatorId, value) {
   put(own(object, shopId), creatorId, value);
 }
 
-function skipReason(state, shopId, creatorId) {
+function skipReason(state, shopId, creatorId, now) {
   if (nested(state.denied, shopId, creatorId)) return '拒绝名单';
-  if (nested(state.history, shopId, creatorId)) return '已有发送或不确定记录';
+  if (activeHistory(state, shopId, creatorId, now)) return '已有发送或不确定记录';
   return null;
 }
 
-export function previewTask(state, config) {
+export function previewTask(state, config, { now = Date.now() } = {}) {
   const snapshot = normalizeConfig(config);
   const seen = new Set();
   let sendableCount = 0;
   const items = snapshot.creators.map(creator => {
-    let reason = seen.has(creator.id) ? '名单重复' : skipReason(state, snapshot.shop.id, creator.id);
+    let reason = seen.has(creator.id) ? '名单重复' : skipReason(state, snapshot.shop.id, creator.id, now);
     seen.add(creator.id);
     if (!reason && sendableCount >= snapshot.limit) reason = '超过单次上限';
     if (!reason) sendableCount++;
@@ -187,7 +194,10 @@ export function reduceQueue(state, event, { now = Date.now(), uid = () => crypto
   if (event.type === 'start') {
     if (task && task.status !== 'completed') throw new Error('请先完成当前任务，不能同时启动新任务');
     const config = normalizeConfig(event.config);
-    const { items, sendableCount } = previewTask(next, config);
+    // Releasing expired records here keeps stored history from growing forever;
+    // 预览与调度都按同一时间点判断，不会出现预览可发、启动却被跳过。
+    pruneHistory(next.history, now);
+    const { items, sendableCount } = previewTask(next, config, { now });
     if (!sendableCount) throw new Error('没有可处理的达人');
     next.task = { id: uid(), sessionId: uid(), binding: normalizeBinding(event.binding), config, status: 'running', items, nextAt: now, reason: null, createdAt: now, updatedAt: now };
     return done();
@@ -298,7 +308,9 @@ export function reduceQueue(state, event, { now = Date.now(), uid = () => crypto
         // Only resume the remaining message of this task. Other tasks still
         // treat a partially submitted sequence as contacted and cannot resend it.
         const partial = item.submittedCount > 0 && history?.taskId === task.id && history.status === 'uncertain';
-        const reason = partial && !nested(next.denied, task.config.shop.id, item.id) ? null : skipReason(next, task.config.shop.id, item.id);
+        // partial 只在本任务同会话内继续未提交的前缀，因此按原始记录判断；
+        // 其余达人一律套用 30 天窗口，过期记录不再阻断。
+        const reason = partial && !nested(next.denied, task.config.shop.id, item.id) ? null : skipReason(next, task.config.shop.id, item.id, now);
         if (reason) {
           item.status = 'skipped'; item.reason = reason;
           if (task.config.targetCount) { task.status = 'paused'; task.reason = `目标名单中的达人已不可发送（${reason}），已暂停；不会补人或重试`; touch(); return done(); }

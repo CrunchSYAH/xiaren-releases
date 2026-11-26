@@ -1,0 +1,28 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>工作台模拟验收 · 本地</title></head><body>
+<p>正在加载本地工作台模拟环境；不会访问 Shopee。</p>
+<script type="module">
+import { createBackend } from '../../extension/core/backend.mjs';
+import { inspectPage } from '../../extension/page-snapshot.mjs';
+const fixture=document.createElement('iframe');fixture.src='/tests/fixtures/marketplace.html?harness=1';fixture.style='position:fixed;left:-10000px;top:0;width:900px;height:700px;border:0';document.body.append(fixture);
+await new Promise(resolve=>fixture.addEventListener('load',resolve,{once:true}));
+let data={},sessionData={},injected=false;
+const source=await (await fetch('../../extension/content.js')).text();
+const api={runtime:{id:'test-extension',getURL:path=>`chrome-extension://test-extension/${path}`},storage:{local:{get:async()=>structuredClone(data),set:async values=>{data={...data,...structuredClone(values)}}},session:{get:async()=>structuredClone(sessionData),set:async values=>{sessionData={...sessionData,...values}}}},tabs:{create:async()=>({id:77}),get:async()=>({id:77,url:'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace',status:'complete'})},scripting:{executeScript:async()=>{
+ if(!injected){injected=true;fixture.contentWindow.chrome={runtime:{sendMessage:async message=>{try{return {ok:true,...await backend.handle(message,{id:'test-extension',documentId:'fixture-document',tab:{id:77},frameId:0,url:'https://seller.shopee.co.id/portal/web-seller-affiliate/kol_marketplace'})}}catch(e){return {ok:false,error:e.message}}}}};fixture.contentWindow.eval(source)}return [];
+}}};
+const backend=createBackend(api,{readSnapshot:async(tabId,text,documentId,commit)=>{
+ // This origin substitution exists only in the fixture, never production code.
+ const localInspector=inspectPage.toString().replaceAll('location.origin', "'https://seller.shopee.co.id'");
+ return fixture.contentWindow.eval(`(${localInspector})(${JSON.stringify(text||'')},${JSON.stringify(commit||null)})`);
+}});
+const panelSender={id:'test-extension',url:api.runtime.getURL('dashboard.html')};
+window.chrome={runtime:{sendMessage:async message=>{try{const result=await backend.handle(message,panelSender);if(message.type==='panel:open')await api.scripting.executeScript({});return {ok:true,...result}}catch(e){return {ok:false,error:e.message}}}}};
+window.__fixtureBackend=backend;window.__fixtureFrame=fixture;
+const html=await (await fetch('../../extension/dashboard.html')).text();
+const parsed=new DOMParser().parseFromString(html,'text/html');
+document.head.append(Object.assign(document.createElement('link'),{rel:'stylesheet',href:'../../extension/dashboard.css'}));
+document.title='本地模拟 · 印尼达人建联';
+for(const child of [...document.body.children])if(child!==fixture)child.remove();
+for(const child of [...parsed.body.children])document.body.append(child);
+await import('../../extension/dashboard.mjs');
+</script></body></html>

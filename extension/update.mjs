@@ -1,5 +1,5 @@
 import { releaseRepository } from './release-config.mjs';
-import { selectRelease, resolveLatestRelease, fetchLatestRelease, downloadAsset, verifyArchive, readArchive, planInstall, releaseAssetName, safeName, UpdaterError } from './updater.mjs';
+import { selectRelease, resolveLatestRelease, fetchLatestRelease, downloadAsset, verifyArchive, readArchive, planInstall, releaseAssetName, safeName, pathSegments, UpdaterError } from './updater.mjs';
 
 const runtimeVersion = globalThis.chrome?.runtime?.getManifest?.().version || '预览';
 const versionLabel = document.getElementById('extension-version');
@@ -83,8 +83,24 @@ async function chooseDirectory() {
   return handle;
 }
 
+// 逐段下钻：getFileHandle 只接受单个路径段，'core/backend.mjs' 会抛 TypeError。
+async function resolveFile(root, name, create = false) {
+  const parts = pathSegments(name), fileName = parts.pop();
+  let dir = root;
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create });
+  return dir.getFileHandle(fileName, { create });
+}
+
+// 删除新建文件同样要落到父目录，根句柄上 removeEntry('core/x.mjs') 不被允许。
+async function removeFile(root, name) {
+  const parts = pathSegments(name), fileName = parts.pop();
+  let dir = root;
+  for (const part of parts) dir = await dir.getDirectoryHandle(part);
+  await dir.removeEntry(fileName);
+}
+
 async function readFolderFile(dir, name) {
-  try { return new Uint8Array(await (await (await dir.getFileHandle(name)).getFile()).arrayBuffer()); }
+  try { return new Uint8Array(await (await (await resolveFile(dir, name)).getFile()).arrayBuffer()); }
   catch { return null; }
 }
 
@@ -164,13 +180,15 @@ async function install() {
       const bytes = await readFolderFile(dir, name);
       if (bytes) backup.set(name, bytes);
     }
+    // manifest.json 最后写：中途失败时目录不会先变成"新版本号 + 缺文件"。
+    const order = [...files.keys()].sort((a, b) => (a === 'manifest.json') - (b === 'manifest.json'));
     setStatus(`正在写入 ${files.size} 个文件…`);
     const written = [];
     try {
-      for (const [name, bytes] of files) {
-        const handle = await dir.getFileHandle(name, { create: true });
+      for (const name of order) {
+        const handle = await resolveFile(dir, name, true);
         const stream = await handle.createWritable();
-        await stream.write(bytes);
+        await stream.write(files.get(name));
         await stream.close();
         written.push(name);
       }
@@ -178,12 +196,12 @@ async function install() {
       setStatus('写入失败，正在恢复原文件…', 'error');
       for (const [name, bytes] of backup) {
         try {
-          const handle = await dir.getFileHandle(name, { create: true });
+          const handle = await resolveFile(dir, name, true);
           const stream = await handle.createWritable();
           await stream.write(bytes); await stream.close();
         } catch { /* Keep restoring the remaining files. */ }
       }
-      for (const name of written) if (!backup.has(name)) { try { await dir.removeEntry(name); } catch { /* Best effort. */ } }
+      for (const name of written) if (!backup.has(name)) { try { await removeFile(dir, name); } catch { /* Best effort. */ } }
       throw new UpdaterError(`写入失败，已尝试恢复原文件：${error?.message || '未知错误'}`);
     }
     setStatus(`已更新到 ${version}，正在重新加载扩展…`, 'success');

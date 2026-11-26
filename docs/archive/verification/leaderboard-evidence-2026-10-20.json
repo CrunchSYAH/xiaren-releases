@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-20",
+  "site": "seller.shopee.co.id",
+  "route": "/portal/web-seller-affiliate/affiliate_leaderboard",
+  "readOnly": true,
+  "draftWritten": false,
+  "attachmentSet": false,
+  "sendClicked": false,
+  "observed": {
+    "tabs": [
+      "Top Sales",
+      "Fast Growing",
+      "Popular Shopee Contents"
+    ],
+    "rowsPerPage": 20,
+    "totalReported": 200,
+    "replacementPagination": true,
+    "recordFields": [
+      "affiliateId",
+      "affiliateUserId",
+      "displayName"
+    ],
+    "rowKeyMatchesAffiliateId": true,
+    "chatRecipientMatchesAffiliateUserId": true,
+    "chatShopMatchesCurrentShop": true,
+    "marketplaceChatIconCount": 0,
+    "chatEntry": "row anchor text Chat without href"
+  },
+  "actualAdapter": {
+    "popularPage1Supported": true,
+    "popularPage2Supported": true,
+    "controlledNextPagePerformed": true,
+    "controlledPreviousPagePerformed": true,
+    "returnedWholePageOrderStable": true,
+    "filterContextStable": true,
+    "controlledChatOpened": true,
+    "chatRecipientAndShopAgree": true,
+    "draftEmpty": true,
+    "mediaCount": 0
+  },
+  "boundaries": [
+    "One Top Sales and one Popular Shopee Contents chat recipient compared; Fast Growing chat was not opened. No actual sending.",
+    "Top Sales and Fast Growing structures observed; full cross-page adapter cycle executed on Popular Shopee Contents.",
+    "No virtual list support claimed; current adapter rejects missing/recycled mounted rows.",
+    "No raw identities, message bodies, tokens, cookies or complete DOM saved."
+  ],
+  "researchTabClosed": true
+}

@@ -1,0 +1,68 @@
+{
+  "date": "2026-10-20",
+  "scope": "two acceptance defects and non-sending verification",
+  "verification": {
+    "formalTests": 403,
+    "failures": 0,
+    "addedRegressions": 10,
+    "syntaxAndManifestCheck": true,
+    "localTestPluginGeneratedOrOperated": false
+  },
+  "installedExtension": {
+    "location": "UNPACKED",
+    "workspaceDirectory": "extension/",
+    "version": "0.1.0",
+    "finalSourceReloaded": true,
+    "runtimeErrors": 0,
+    "manifestErrors": 0
+  },
+  "leaderboard": {
+    "mode": "dry-run",
+    "targetCount": 1,
+    "messagesPerTarget": 2,
+    "taskStatus": "completed",
+    "itemStatus": "rehearsed",
+    "submittedCount": 0,
+    "historyUnchanged": true
+  },
+  "affiliates": {
+    "mode": "dry-run",
+    "targetCount": 1,
+    "messagesPerTarget": 2,
+    "taskStatus": "completed",
+    "itemStatus": "rehearsed",
+    "submittedCount": 0,
+    "historyUnchanged": true,
+    "differentSampleWithTwoChatButtonsRejected": true,
+    "realMultipleTargetNavigationVerified": false,
+    "delayedShopRecoveryCoveredInNode": true
+  },
+  "creatorLibrary": {
+    "syntheticRecordsImportedAndSelected": 200,
+    "longNamesNotesAndTags": true,
+    "openerHandoffReceived": true,
+    "originalDashboardDraftsPreserved": true,
+    "originalDashboardClosed": true,
+    "fallbackHandoffReceived": true,
+    "temporarySelectionConsumed": true,
+    "explicitApplyRevisionAndShopChecksCoveredInNode": true
+  },
+  "finalChat": {
+    "draftEmpty": true,
+    "mediaCount": 0,
+    "replyCount": 0
+  },
+  "cleanup": {
+    "originalStorageBackedUpOutsideRepository": true,
+    "restoredStorageDeepEqualsBackup": true,
+    "originalTaskStillCompleted": true,
+    "workspaceAbsent": true,
+    "allCreatedTabsClosed": true
+  },
+  "boundaries": [
+    "No real message submission, attachment upload or sending test.",
+    "One creator per source was rehearsed; no claim of real 200-person or multiple-detail execution.",
+    "Ambiguous chat controls remain blocked; unknown page structures are not accepted.",
+    "No raw identities, shop data, message bodies, credentials or page source are recorded here."
+  ]
+}
